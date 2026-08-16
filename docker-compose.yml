@@ -1,0 +1,49 @@
+# NEXORA local development infrastructure.
+#
+# Start:   docker compose up -d
+# Stop:    docker compose down
+# Reset:   docker compose down -v      (deletes all data -- destructive)
+#
+# Only PostgreSQL is defined. Redis is deliberately absent until a phase
+# actually needs caching or background jobs, per the project's
+# "don't overbuild" rule.
+
+services:
+  postgres:
+    # The official pgvector image is plain PostgreSQL with the `vector`
+    # extension already compiled in. Using it now means Phase 6 (RAG) needs
+    # no new infrastructure -- and no compiling pgvector on Windows.
+    image: pgvector/pgvector:pg17
+    container_name: nexora-postgres
+    restart: unless-stopped
+
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-nexora}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-nexora_dev_password}
+      POSTGRES_DB: ${POSTGRES_DB:-nexora}
+
+    ports:
+      # SECURITY: bound to 127.0.0.1, not 0.0.0.0. Without the explicit
+      # loopback address Docker publishes the port on every network
+      # interface, exposing the database -- with a development password --
+      # to anyone on the same Wi-Fi network.
+      - '127.0.0.1:5432:5432'
+
+    volumes:
+      # Named volume so data survives `docker compose down`.
+      - postgres-data:/var/lib/postgresql/data
+      # Scripts here run once, only when the data directory is first created.
+      - ./infra/postgres/init:/docker-entrypoint-initdb.d:ro
+
+    healthcheck:
+      # Lets `docker compose ps` and dependent services distinguish
+      # "container started" from "database actually accepting queries".
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-nexora} -d ${POSTGRES_DB:-nexora}']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+volumes:
+  postgres-data:
+    name: nexora-postgres-data
