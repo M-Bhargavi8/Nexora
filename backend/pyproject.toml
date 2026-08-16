@@ -1,0 +1,15 @@
+# Tool configuration for the NEXORA backend.
+#
+# There is deliberately no [project] table yet: the backend is run as an
+# application, not installed as a library, so packaging metadata would be
+# unused ceremony.
+
+[tool.pytest.ini_options]
+# "auto" means async test functions run without needing an @pytest.mark.asyncio
+# decorator on every one of them.
+asyncio_mode = "auto"
+testpaths = ["tests"]
+# Put the backend directory on sys.path so tests can `import app` without
+# installing the package first.
+pythonpath = ["."]
+addopts = "-ra --strict-markers"

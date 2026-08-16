@@ -1,0 +1,20 @@
+# NEXORA backend -- runtime dependencies.
+#
+# Versions are pinned exactly so that every machine and every deployment
+# installs an identical set. These are the versions that were actually
+# resolved and tested, not versions chosen from memory.
+#
+# Install:  pip install -r requirements.txt
+
+# --- Web framework ---
+fastapi==0.141.1              # async API framework; generates OpenAPI docs
+uvicorn[standard]==0.52.3     # ASGI server that runs the app
+
+# --- Validation & configuration ---
+pydantic==2.13.4              # validates data at every API boundary
+pydantic-settings==2.15.0     # loads typed settings from environment variables
+
+# --- Database ---
+sqlalchemy[asyncio]==2.0.52   # ORM; parameterized queries prevent SQL injection
+asyncpg==0.31.0               # async PostgreSQL driver (never blocks the event loop)
+alembic==1.19.1               # version-controlled schema migrations

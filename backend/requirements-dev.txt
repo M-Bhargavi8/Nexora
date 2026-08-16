@@ -1,0 +1,13 @@
+# NEXORA backend -- development and testing dependencies.
+#
+# Kept separate from requirements.txt so production images do not ship the
+# test suite and its dependencies: less to install, and a smaller attack
+# surface.
+#
+# Install:  pip install -r requirements.txt -r requirements-dev.txt
+
+-r requirements.txt
+
+pytest==9.1.1                 # test runner
+pytest-asyncio==1.4.0         # lets pytest run async test functions
+httpx==0.28.1                 # async HTTP client; calls the app in-process
