@@ -71,7 +71,25 @@ stalls a project two months in. Docker also means the database we develop
 against is the same one we deploy, which is a real engineering answer to give
 in an interview.
 
-Until this is decided, Phase 1 cannot honestly claim a working database layer.
+> ### ✅ Decision (2026-08-16): Option A — Docker Desktop
+>
+> PostgreSQL and Redis run as containers in local development, using the
+> official `pgvector/pgvector` image so the vector extension needs no
+> compilation. Docker is installed by the developer (it requires
+> administrator rights, enables WSL2, and may need a reboot — so it is not
+> automated).
+>
+> **Consequences accepted:**
+> - Docker Desktop must be running for the backend's database layer to work.
+>   Phase 1 will fail fast with a clear error message if it is not, rather
+>   than hanging on a connection timeout.
+> - ~2 GB RAM overhead while running (we have 15.7 GB — acceptable).
+> - Database credentials and ports live in `.env`, never in committed files.
+> - Phase 15 (production) already has Docker as a prerequisite, so this is
+>   groundwork rather than a detour.
+>
+> **Rejected:** native Postgres (no official Windows pgvector build), and
+> SQLite (no vector search — would force a migration at Phase 6).
 
 ### 1.4 Deferred, by design
 

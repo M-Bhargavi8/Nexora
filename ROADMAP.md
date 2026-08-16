@@ -17,9 +17,10 @@ No app code.
 (see `ARCHITECTURE.md` §1). Python 3.11.9, Node v24.13.0, npm 11.6.2 and
 git 2.52.0 confirmed present. **PostgreSQL and Docker confirmed absent.**
 
-> ⛔ **Blocking Phase 1:** how we run PostgreSQL + pgvector must be decided
-> (`ARCHITECTURE.md` §1.3 — recommendation: Docker Desktop). Phase 1 cannot
-> build a real database layer until this is resolved.
+> ✅ **Resolved (2026-08-16):** PostgreSQL + pgvector will run in Docker,
+> using the official `pgvector/pgvector` image (`ARCHITECTURE.md` §1.3).
+> Docker Desktop is installed manually by the developer, since it needs
+> administrator rights and possibly a reboot.
 
 ## Phase 1 — Foundation ⚪
 React + TypeScript + Vite + Tailwind, FastAPI, PostgreSQL. Project structure,
