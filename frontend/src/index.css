@@ -1,0 +1,69 @@
+@import 'tailwindcss';
+
+/*
+ * NEXORA design tokens.
+ *
+ * Tailwind v4 has no tailwind.config.js -- the theme is declared here in CSS.
+ * Each token below automatically generates utilities, so `--color-brand-500`
+ * gives you `bg-brand-500`, `text-brand-500`, `border-brand-500`, and so on.
+ *
+ * Defining a small, named palette (rather than scattering arbitrary hex
+ * values through components) is what keeps an interface visually coherent as
+ * it grows.
+ */
+@theme {
+  /* Surfaces -- deep, slightly blue-shifted neutrals */
+  --color-ink-950: #07080c;
+  --color-ink-900: #0b0d13;
+  --color-ink-850: #10131b;
+  --color-ink-800: #161a25;
+  --color-ink-700: #212636;
+  --color-ink-600: #2f3549;
+
+  /* Text */
+  --color-mist-100: #eef1f7;
+  --color-mist-300: #b6bdcd;
+  --color-mist-500: #7c8499;
+
+  /* Brand -- teal, used sparingly for emphasis and identity */
+  --color-brand-300: #6ff0e0;
+  --color-brand-400: #3ddfcc;
+  --color-brand-500: #1cc4b0;
+  --color-brand-600: #12a08f;
+
+  /* Secondary accent, for the wordmark gradient */
+  --color-halo-400: #8b7cf6;
+
+  /* Semantic status colours */
+  --color-ok-400: #4ade80;
+  --color-ok-600: #16a34a;
+  --color-warn-400: #fbbf24;
+  --color-down-400: #f87171;
+  --color-down-600: #dc2626;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  background-color: var(--color-ink-950);
+  color: var(--color-mist-100);
+  font-family:
+    ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Respect users who have asked for reduced motion. An accessibility
+   requirement, not a nicety. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
