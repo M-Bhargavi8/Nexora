@@ -8,15 +8,12 @@ workspace. It is not a clone of any existing product's UI, branding, or
 proprietary implementation — it is our own system, built incrementally so that
 every layer is understood before the next one is added.
 
-> **Status: Phase 0 — Architecture & Planning.**
-> No application code has been written yet. This phase only establishes the
-> plan, the repository shape, and the documentation. See [`ROADMAP.md`](./ROADMAP.md)
-> for what comes next and [`ARCHITECTURE.md`](./ARCHITECTURE.md) for how the
-> system is designed.
->
-> **One decision is blocking Phase 1:** how we run PostgreSQL + pgvector, since
-> neither PostgreSQL nor Docker is installed on the dev machine. The options and
-> a recommendation are in `ARCHITECTURE.md` §1.3.
+> **Status: Phase 1 — Foundation, complete.**
+> A working vertical slice: a React page that calls the FastAPI backend, which
+> reports whether it can reach PostgreSQL. Configuration, structured logging,
+> async database sessions, migrations, and a 45-test backend suite are in
+> place. No AI features yet — those begin at Phase 3.
+> See [`ROADMAP.md`](./ROADMAP.md) for what comes next.
 
 ---
 
@@ -72,28 +69,98 @@ run PostgreSQL.
 
 ```text
 nexora/
-├── README.md              # This file
-├── ARCHITECTURE.md        # System design, data flow, security model
-├── ROADMAP.md             # Phase-by-phase build plan and status
-├── .gitignore
-├── docs/                  # Additional design notes, ADRs, diagrams
-├── frontend/               # React + TypeScript + Vite app
-│   └── src/
-└── backend/                 # FastAPI application
-    └── app/
+├── README.md               # This file
+├── ARCHITECTURE.md         # System design, data flow, security model
+├── ROADMAP.md              # Phase-by-phase build plan and status
+├── docker-compose.yml      # PostgreSQL + pgvector for local development
+├── infra/
+│   └── postgres/init/      # Runs once on first database creation
+├── backend/                # FastAPI application
+│   ├── app/
+│   │   ├── api/routes/     # HTTP endpoints
+│   │   ├── core/           # Config, logging, middleware
+│   │   ├── db/             # Engine, sessions, ORM base
+│   │   ├── schemas/        # Pydantic request/response models
+│   │   └── main.py         # Application factory
+│   ├── alembic/            # Database migrations
+│   ├── tests/
+│   └── requirements.txt
+└── frontend/               # React + TypeScript + Vite app
+    └── src/
+        ├── components/     # Presentational components
+        ├── hooks/          # Data-loading logic
+        └── lib/api.ts      # Typed backend client
 ```
 
-This is the **target** layout. Today the repository contains only the four
-Phase 0 documents plus `.gitattributes` — no `frontend/`, `backend/` or
-`docs/` directory exists yet. Phase 1 creates them along with a working,
-minimal app. (Empty directories are deliberately not created, because git
-cannot track them and they would only be decoration.)
+Everything above exists as of Phase 1. Directories arrive as the phase that
+needs them arrives — there are no empty placeholder folders.
 
 ## 5. How to Run NEXORA
 
-There is nothing to run yet. This section will be filled in at the end of
-Phase 1 with concrete commands for starting the frontend dev server, the
-backend API, and the database.
+**Prerequisites:** Python 3.11+, Node.js 20.19+, and Docker Desktop.
+
+### First-time setup
+
+```bash
+# 1. Database
+docker compose up -d
+
+# 2. Backend
+cd backend
+python -m venv .venv
+.venv\Scripts\activate                 # Windows;  source .venv/bin/activate on macOS/Linux
+pip install -r requirements.txt -r requirements-dev.txt
+copy .env.example .env                 # then set SECRET_KEY (see below)
+alembic upgrade head
+
+# 3. Frontend
+cd ../frontend
+npm install
+copy .env.example .env
+```
+
+Generate a `SECRET_KEY` for `backend/.env`:
+
+```bash
+python -c "import secrets; print(secrets.token_urlsafe(48))"
+```
+
+### Every day
+
+Three terminals:
+
+```bash
+docker compose up -d
+```
+
+```bash
+cd backend && .venv\Scripts\python.exe -m uvicorn app.main:app --reload --port 8000
+```
+
+```bash
+cd frontend && npm run dev
+```
+
+| What | URL |
+|---|---|
+| Frontend | http://localhost:5173 |
+| API health | http://localhost:8000/api/v1/health |
+| API docs (dev only) | http://localhost:8000/docs |
+
+### Tests
+
+```bash
+cd backend && .venv\Scripts\python.exe -m pytest -v
+```
+
+### Troubleshooting
+
+- **"Database unavailable" on the status page** — the API is fine and
+  correctly reporting the database is down. Run `docker compose up -d`.
+- **"Cannot reach the API"** — the backend isn't running, or `VITE_API_URL`
+  in `frontend/.env` points somewhere else.
+- **Backend won't start, `SECRET_KEY` error** — expected. Copy
+  `.env.example` to `.env` and set a key of at least 32 characters.
 
 ## 6. Development Philosophy
 

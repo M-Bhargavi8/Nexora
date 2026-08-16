@@ -22,14 +22,26 @@ git 2.52.0 confirmed present. **PostgreSQL and Docker confirmed absent.**
 > Docker Desktop is installed manually by the developer, since it needs
 > administrator rights and possibly a reboot.
 
-## Phase 1 — Foundation ⚪
+## Phase 1 — Foundation ✅
 React + TypeScript + Vite + Tailwind, FastAPI, PostgreSQL. Project structure,
 health endpoint, DB connection, config system, env handling, logging, basic
 frontend, and confirmed frontend↔backend communication.
 
-Ordering note: the frontend, the FastAPI skeleton, config and logging have no
-dependency on the database and can be built and tested first. Only the DB
-connection step is gated on the §1.3 decision.
+**Delivered and verified:**
+- FastAPI app factory with typed settings (fails fast on missing/short secrets)
+- Structured logging with per-request correlation ids (console + JSON formats)
+- Liveness (`/api/v1/health`) and readiness (`/api/v1/health/ready`) endpoints
+- Async SQLAlchemy engine, session dependency, and a **bounded** readiness probe
+- Alembic configured for async migrations, credentials injected at runtime
+- React + TypeScript + Tailwind v4 status page with a typed API client
+- `docker-compose.yml` running `pgvector/pgvector:pg17`, bound to loopback only
+- 45 backend tests passing
+
+**Verified against a live database:** ❌ not yet. Docker was not installed on
+the dev machine when Phase 1 was built, so the "database reachable" path is
+covered by tests using a fake, not by a real connection. The failure path
+(*database unreachable → 503*) was verified for real. This must be closed out
+before Phase 2 depends on the database.
 
 ## Phase 2 — Authentication ⚪
 Signup, login, logout, password hashing, protected routes, session/token
