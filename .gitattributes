@@ -1,0 +1,27 @@
+# Normalize line endings.
+#
+# Development happens on Windows (CRLF) but the app will eventually run in
+# Linux containers (LF). Without this, a shell script committed with CRLF
+# fails inside a container with a confusing "bad interpreter" error.
+#
+# `text=auto eol=lf` means: git stores text files with LF in the repository,
+# and checks them out with LF. Editors on Windows handle LF fine.
+
+* text=auto eol=lf
+
+# Files that must never be converted (they are not text).
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.pdf   binary
+*.woff  binary
+*.woff2 binary
+*.xlsx  binary
+*.docx  binary
+
+# Windows-only scripts genuinely need CRLF.
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+*.ps1   text eol=crlf
