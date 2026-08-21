@@ -8,12 +8,16 @@ workspace. It is not a clone of any existing product's UI, branding, or
 proprietary implementation — it is our own system, built incrementally so that
 every layer is understood before the next one is added.
 
-> **Status: Phase 1 — Foundation, complete.**
+> **Status: Phase 1 — Foundation, complete and verified against a live
+> database (2026-08-22).**
 > A working vertical slice: a React page that calls the FastAPI backend, which
 > reports whether it can reach PostgreSQL. Configuration, structured logging,
 > async database sessions, migrations, and a 45-test backend suite are in
-> place. No AI features yet — those begin at Phase 3.
-> See [`ROADMAP.md`](./ROADMAP.md) for what comes next.
+> place — and PostgreSQL 17.11 + pgvector 0.8.6 now run for real, with the
+> readiness endpoint returning 200 and the UI showing *Database: Connected*.
+> No AI features yet — those begin at Phase 3.
+> See [`ROADMAP.md`](./ROADMAP.md) for the verification evidence and what
+> comes next.
 
 ---
 
@@ -58,12 +62,15 @@ with a system that:
 | Testing | Pytest (backend), a React testing library (frontend) |
 | Deployment (later) | Docker, reverse proxy, CI/CD |
 
-Nothing here is installed or wired up yet — this table documents the target.
-Python, Node, npm and git **are** present on the dev machine and were verified
-by running them; **PostgreSQL and Docker are not installed yet** and must be
-resolved before Phase 1's database work. See `ARCHITECTURE.md` §1
-"Environment Check" for the verified inventory and the open decision on how we
-run PostgreSQL.
+Rows below the Database line are still targets — Redis, the AI gateway and
+the deployment tooling arrive with the phase that needs them. Everything up to
+and including the database **is installed and running**: Python 3.11.9, Node
+v24.13.0, npm 11.6.2, git 2.52.0, Docker 29.7.2, and PostgreSQL 17.11 with
+pgvector 0.8.6 in a container. One known gap: **the frontend has no test
+runner yet** (no `test` script in `package.json`) — Vitest + React Testing
+Library are needed before Phase 3. See `ARCHITECTURE.md` §1 "Environment
+Check" for the full inventory and the reasoning behind running PostgreSQL in
+Docker.
 
 ## 4. Repository Structure (Target)
 

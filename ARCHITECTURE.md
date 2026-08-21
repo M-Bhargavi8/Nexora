@@ -27,7 +27,7 @@ assumption. Every row below was verified by running the tool, not inferred.
 | VS Code | present | Editor. |
 | winget | present | Windows package manager — how we install what's missing. |
 
-### 1.2 Missing
+### 1.2 Missing (as found at Phase 0 — since resolved, see below)
 
 | Tool | Status | Impact |
 |---|---|---|
@@ -38,6 +38,24 @@ assumption. Every row below was verified by running the tool, not inferred.
 
 Ports 5432, 6379, 8000 (planned API) and 5173 (planned Vite dev server) are all
 free — no conflicts to work around.
+
+> ### ✅ Gap closed (2026-08-21/22)
+>
+> The table above is the **Phase 0 snapshot** and is kept as the record of what
+> the decision in §1.3 was made against. Both blocking gaps are now resolved:
+>
+> | Tool | Now | Verified by |
+> |---|---|---|
+> | Docker | **29.7.2** + Compose **v5.3.1** | `docker version` against a live daemon |
+> | PostgreSQL | **17.11** in `nexora-postgres`, healthy on `127.0.0.1:5432` | `docker compose ps`, `pg_isready` |
+> | pgvector | **0.8.6** | `'[1,2,3]'::vector <-> '[4,5,6]'::vector` → `5.196…` (= √27) |
+>
+> Redis remains deliberately absent — no phase before ~7 needs it.
+>
+> Still missing, and tracked rather than assumed away: **no frontend test
+> runner** (`frontend/package.json` has no `test` script). Vitest + React
+> Testing Library are needed to satisfy the testing standard, ideally before
+> Phase 3 puts real logic in the UI.
 
 ### 1.3 Open decision — how we run PostgreSQL
 

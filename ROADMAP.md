@@ -21,6 +21,10 @@ git 2.52.0 confirmed present. **PostgreSQL and Docker confirmed absent.**
 > using the official `pgvector/pgvector` image (`ARCHITECTURE.md` §1.3).
 > Docker Desktop is installed manually by the developer, since it needs
 > administrator rights and possibly a reboot.
+>
+> ✅ **Closed out (2026-08-21):** Docker Desktop and WSL 2 installed and
+> running; the stack comes up with `docker compose up -d`. See Phase 1 below
+> for the live-database verification this unblocked.
 
 ## Phase 1 — Foundation ✅
 React + TypeScript + Vite + Tailwind, FastAPI, PostgreSQL. Project structure,
@@ -37,11 +41,33 @@ frontend, and confirmed frontend↔backend communication.
 - `docker-compose.yml` running `pgvector/pgvector:pg17`, bound to loopback only
 - 45 backend tests passing
 
-**Verified against a live database:** ❌ not yet. Docker was not installed on
-the dev machine when Phase 1 was built, so the "database reachable" path is
-covered by tests using a fake, not by a real connection. The failure path
-(*database unreachable → 503*) was verified for real. This must be closed out
-before Phase 2 depends on the database.
+**Verified against a live database:** ✅ **2026-08-22.** When Phase 1 was
+built, Docker was not installed, so the "database reachable" path was covered
+only by tests using a fake. That gap is now closed — every item below was
+executed against the real database, not asserted:
+
+- `docker compose up -d` → `nexora-postgres` **healthy**, bound to
+  `127.0.0.1:5432`; container logs clean, `pg_isready` accepting connections
+- PostgreSQL **17.11**; the init script ran and `pgvector` **0.8.6** was tested
+  *functionally*, not just for presence:
+  `'[1,2,3]'::vector <-> '[4,5,6]'::vector` → `5.196…` (= √27)
+- **FastAPI connects** through its own code path — `check_database_connection()`
+  returned `True` over `asyncpg`, `current_database: nexora`
+- **`GET /api/v1/health/ready` → 200** `{"status":"ready","checks":[{"name":
+  "database","healthy":true}]}` (the success path, previously unproven)
+- **Alembic connects** (`Context impl PostgresqlImpl`). `upgrade head` →
+  `alembic check` ("No new upgrade operations detected") → `downgrade base`
+  were all exercised against a **throwaway** database, so the `nexora`
+  database is untouched and still at base
+- **Frontend** status page flipped from *Database: Unavailable* to
+  **Database: Connected**; no console errors
+- **45 committed backend tests passing**
+
+Root cause of the delay, for the record: Docker Desktop crashed at startup on
+orphaned AF_UNIX socket reparse points left by an unclean shutdown
+(`ERROR_CANT_ACCESS_FILE`), which presents as a *hanging* `docker version`
+rather than an error. Fixed by renaming the parent directories so Docker
+recreates them.
 
 ## Phase 2 — Authentication ⚪
 Signup, login, logout, password hashing, protected routes, session/token
