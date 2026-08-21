@@ -13,8 +13,14 @@ uvicorn[standard]==0.52.3     # ASGI server that runs the app
 # --- Validation & configuration ---
 pydantic==2.13.4              # validates data at every API boundary
 pydantic-settings==2.15.0     # loads typed settings from environment variables
+email-validator==2.3.0        # backs pydantic's EmailStr; without it, importing
+                              # app.schemas.auth fails at startup
 
 # --- Database ---
 sqlalchemy[asyncio]==2.0.52   # ORM; parameterized queries prevent SQL injection
 asyncpg==0.31.0               # async PostgreSQL driver (never blocks the event loop)
 alembic==1.19.1               # version-controlled schema migrations
+
+# --- Security ---
+argon2-cffi==25.1.0           # Argon2id password hashing (app/core/security.py).
+                              # Runtime, not dev: the app cannot import without it.

@@ -15,7 +15,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, PostgresDsn
+from pydantic import Field, PostgresDsn, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # app/core/config.py -> app/core -> app -> backend
@@ -62,6 +62,30 @@ class Settings(BaseSettings):
     # API process.
     db_connect_timeout_seconds: float = 3.0
 
+    # --- Sessions / authentication ---
+    session_cookie_name: str = "nexora_session"
+    session_lifetime_days: int = 7
+    # SECURITY: `secure=True` tells the browser to send the cookie only over
+    # HTTPS. It must be False in local development (http://localhost) or the
+    # browser silently drops the cookie and login appears to "just not work".
+    # It MUST be True in production -- enforced by the validator below.
+    session_cookie_secure: bool = False
+    # "lax" sends the cookie on top-level navigations but not on cross-site
+    # subrequests, which is the primary CSRF defence.
+    session_cookie_samesite: Literal["lax", "strict", "none"] = "lax"
+
+    # --- Rate limiting ---
+    # Applied to authentication endpoints to slow password brute-forcing.
+    #
+    # Two dimensions, because they stop different attacks: the per-IP limit
+    # stops one machine guessing many passwords, the per-account limit stops a
+    # botnet guessing one account's password from many addresses.
+    auth_rate_limit_attempts: int = 10
+    auth_rate_limit_window_seconds: int = 60
+    # Stricter than the per-IP limit: a real person rarely mistypes their own
+    # password five times in a minute, while an attacker does nothing else.
+    auth_account_rate_limit_attempts: int = 5
+
     # --- CORS ---
     # Comma-separated list. Never "*" -- see cors_origin_list.
     cors_origins: str = "http://localhost:5173"
@@ -69,6 +93,42 @@ class Settings(BaseSettings):
     # --- Logging ---
     log_level: str = "INFO"
     log_format: Literal["console", "json"] = "console"
+
+    @model_validator(mode="after")
+    def enforce_production_hardening(self) -> Settings:
+        """Refuse to start with insecure settings in production.
+
+        A configuration flag that is safe in development and dangerous in
+        production is exactly the kind of thing that gets forgotten during a
+        deploy. Making the application refuse to boot turns a silent security
+        hole into an obvious, immediate failure.
+        """
+        if self.app_env == "production" and not self.session_cookie_secure:
+            raise ValueError(
+                "SESSION_COOKIE_SECURE must be true in production, otherwise "
+                "the session cookie can be sent over plain HTTP and stolen."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def enforce_samesite_none_requires_secure(self) -> Settings:
+        """Reject SameSite=None without Secure, in every environment.
+
+        This is a correctness bug before it is a security one: every current
+        browser *silently discards* a `SameSite=None` cookie that is not also
+        `Secure`. The symptom is a login that returns 200 and then behaves as
+        though it never happened, which is miserable to debug. Failing at
+        startup turns it into one clear message.
+
+        It is a security issue too -- SameSite=None switches off the primary
+        CSRF defence, so the cookie had better not also travel over plain HTTP.
+        """
+        if self.session_cookie_samesite == "none" and not self.session_cookie_secure:
+            raise ValueError(
+                "SESSION_COOKIE_SAMESITE=none requires SESSION_COOKIE_SECURE=true. "
+                "Browsers silently drop a SameSite=None cookie that is not Secure."
+            )
+        return self
 
     @property
     def is_production(self) -> bool:

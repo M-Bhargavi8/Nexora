@@ -8,16 +8,18 @@ workspace. It is not a clone of any existing product's UI, branding, or
 proprietary implementation — it is our own system, built incrementally so that
 every layer is understood before the next one is added.
 
-> **Status: Phase 1 — Foundation, complete and verified against a live
-> database (2026-08-22).**
+> **Status: Phase 2 — Authentication, complete and verified end to end
+> (2026-08-22).**
 > A working vertical slice: a React page that calls the FastAPI backend, which
 > reports whether it can reach PostgreSQL. Configuration, structured logging,
 > async database sessions, migrations, and a 45-test backend suite are in
-> place — and PostgreSQL 17.11 + pgvector 0.8.6 now run for real, with the
-> readiness endpoint returning 200 and the UI showing *Database: Connected*.
+> place, and PostgreSQL 17.11 + pgvector 0.8.6 run for real. On top of that,
+> Phase 2 adds Argon2id password hashing, httpOnly cookie sessions, CSRF
+> origin checks, two-dimensional rate limiting, and protected routes behind a
+> `RequireAuth` guard — 153 backend tests and 26 frontend tests passing.
 > No AI features yet — those begin at Phase 3.
-> See [`ROADMAP.md`](./ROADMAP.md) for the verification evidence and what
-> comes next.
+> See [`ROADMAP.md`](./ROADMAP.md) for the verification evidence, including
+> the limitations that are deliberately still open.
 
 ---
 

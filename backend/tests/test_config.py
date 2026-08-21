@@ -118,8 +118,71 @@ class TestEnvironment:
             build_settings(app_env="staging")
 
     def test_is_production_flag(self) -> None:
-        assert build_settings(app_env="production").is_production is True
+        production = build_settings(app_env="production", session_cookie_secure=True)
+
+        assert production.is_production is True
         assert build_settings(app_env="development").is_production is False
 
     def test_defaults_to_development(self) -> None:
         assert build_settings().app_env == "development"
+
+
+class TestProductionHardening:
+    def test_refuses_an_insecure_session_cookie_in_production(self) -> None:
+        """SECURITY: without `secure`, the browser will send the session
+        cookie over plain HTTP, where anyone on the network path can read it.
+
+        Making the application refuse to boot turns a setting somebody forgot
+        to flip during a deploy into an immediate, obvious failure rather than
+        a silent vulnerability.
+        """
+        with pytest.raises(ValidationError) as exc_info:
+            build_settings(app_env="production", session_cookie_secure=False)
+
+        assert "SESSION_COOKIE_SECURE" in str(exc_info.value)
+
+    def test_allows_a_secure_session_cookie_in_production(self) -> None:
+        settings = build_settings(app_env="production", session_cookie_secure=True)
+
+        assert settings.session_cookie_secure is True
+
+    def test_allows_an_insecure_cookie_outside_production(self) -> None:
+        """Local development runs on plain http://localhost, where a `secure`
+        cookie would be silently dropped and login would appear broken."""
+        settings = build_settings(app_env="development", session_cookie_secure=False)
+
+        assert settings.session_cookie_secure is False
+
+
+class TestSameSiteNoneRequiresSecure:
+    def test_refuses_samesite_none_without_secure(self) -> None:
+        """A correctness bug before it is a security one: every current browser
+        silently discards a SameSite=None cookie that is not also Secure, so
+        login returns 200 and then behaves as though it never happened."""
+        with pytest.raises(ValidationError) as exc_info:
+            build_settings(
+                app_env="development",
+                session_cookie_samesite="none",
+                session_cookie_secure=False,
+            )
+
+        assert "SESSION_COOKIE_SAMESITE" in str(exc_info.value)
+
+    def test_allows_samesite_none_with_secure(self) -> None:
+        settings = build_settings(
+            app_env="development",
+            session_cookie_samesite="none",
+            session_cookie_secure=True,
+        )
+
+        assert settings.session_cookie_samesite == "none"
+
+    def test_lax_does_not_require_secure(self) -> None:
+        """The default. Local development must keep working over plain HTTP."""
+        settings = build_settings(
+            app_env="development",
+            session_cookie_samesite="lax",
+            session_cookie_secure=False,
+        )
+
+        assert settings.session_cookie_samesite == "lax"

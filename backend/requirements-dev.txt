@@ -11,3 +11,6 @@
 pytest==9.1.1                 # test runner
 pytest-asyncio==1.4.0         # lets pytest run async test functions
 httpx==0.28.1                 # async HTTP client; calls the app in-process
+aiosqlite==0.22.1             # async SQLite driver. Tests only -- the suite runs
+                              # against an in-memory database so it needs no
+                              # PostgreSQL container. Production uses asyncpg.

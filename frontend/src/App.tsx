@@ -1,143 +1,52 @@
 /**
- * NEXORA — Phase 1 system status page.
+ * The route table.
  *
- * This page exists to prove the full chain works end to end:
- *   browser -> Vite dev server -> FastAPI -> PostgreSQL
+ * Every route is wrapped in the guard that expresses its access rule, rather
+ * than each page checking for itself. Keeping the rule beside the route means
+ * you can read this one file and know exactly which pages are protected --
+ * instead of trusting that nobody forgot a check inside a component.
  *
- * It is replaced by the real workspace UI in Phase 3. Until then it is the
- * fastest way to see whether the stack is wired up correctly.
+ *   /login, /signup   public, but bounce an already signed-in user home
+ *   /                 protected: requires a valid session
+ *   anything else     redirect home, which then applies the rule above
  */
 
-import { StatusRow } from './components/StatusRow'
-import { type PillTone } from './components/StatusPill'
-import { useSystemStatus } from './hooks/useSystemStatus'
-import { API_BASE_URL } from './lib/api'
-
-/** Map a component's loading/up state onto a pill colour. */
-function statusTone(isLoading: boolean, isUp: boolean): PillTone {
-  if (isLoading) return 'pending'
-  return isUp ? 'ok' : 'down'
-}
+import { Navigate, Route, Routes } from 'react-router'
+import { RedirectIfAuthenticated } from './components/RedirectIfAuthenticated'
+import { RequireAuth } from './components/RequireAuth'
+import LoginPage from './pages/LoginPage'
+import SignupPage from './pages/SignupPage'
+import StatusPage from './pages/StatusPage'
 
 export default function App() {
-  const { isLoading, health, readiness, error, lastCheckedAt, latencyMs, refresh } =
-    useSystemStatus()
-
-  const apiIsUp = health !== null
-  const databaseCheck = readiness?.checks.find((check) => check.name === 'database')
-  const databaseIsUp = databaseCheck?.healthy === true
-
   return (
-    <div className="relative min-h-full overflow-hidden">
-      {/* Decorative background glow. aria-hidden so screen readers skip it. */}
-      <div
-        aria-hidden="true"
-        className="pointer-events-none absolute inset-x-0 top-0 h-[420px] bg-[radial-gradient(60%_100%_at_50%_0%,rgba(28,196,176,0.16),transparent_70%)]"
+    <Routes>
+      <Route
+        path="/login"
+        element={
+          <RedirectIfAuthenticated>
+            <LoginPage />
+          </RedirectIfAuthenticated>
+        }
       />
-
-      <div className="relative mx-auto flex min-h-full max-w-3xl flex-col px-6 py-14 sm:py-20">
-        <header>
-          <div className="flex items-center gap-3">
-            <h1 className="bg-gradient-to-r from-brand-300 via-brand-400 to-halo-400 bg-clip-text text-3xl font-semibold tracking-tight text-transparent">
-              NEXORA
-            </h1>
-            <span className="rounded-md border border-ink-700 bg-ink-850 px-2 py-0.5 text-[11px] font-medium text-mist-500">
-              Phase&nbsp;1
-            </span>
-          </div>
-          <p className="mt-2 text-sm text-mist-300">Your Intelligent AI Workspace</p>
-        </header>
-
-        <main className="mt-10">
-          <section
-            aria-labelledby="system-status-heading"
-            className="overflow-hidden rounded-xl border border-ink-700/70 bg-ink-900/70 shadow-2xl shadow-black/40 backdrop-blur"
-          >
-            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-ink-700/60 bg-ink-850/60 px-5 py-3.5">
-              <h2
-                id="system-status-heading"
-                className="text-sm font-semibold text-mist-100"
-              >
-                System status
-              </h2>
-              <button
-                type="button"
-                onClick={refresh}
-                disabled={isLoading}
-                className="rounded-md border border-ink-600 bg-ink-800 px-3 py-1.5 text-xs font-medium text-mist-300 transition-colors hover:border-brand-500/50 hover:text-brand-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-500 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                {isLoading ? 'Checking…' : 'Refresh'}
-              </button>
-            </div>
-
-            {/* aria-live announces status changes to screen-reader users
-                without them needing to re-read the page. */}
-            <div aria-live="polite">
-              <StatusRow
-                name="API"
-                description="FastAPI backend"
-                tone={statusTone(isLoading,apiIsUp)}
-                pillLabel={isLoading ? 'Checking' : apiIsUp ? 'Online' : 'Offline'}
-                detail={
-                  apiIsUp
-                    ? `FastAPI · v${health.version} · ${health.environment}`
-                    : error
-                }
-              />
-              <StatusRow
-                name="Database"
-                description="PostgreSQL + pgvector"
-                tone={statusTone(isLoading,databaseIsUp)}
-                pillLabel={
-                  isLoading ? 'Checking' : databaseIsUp ? 'Connected' : 'Unavailable'
-                }
-                detail={
-                  databaseIsUp
-                    ? 'PostgreSQL · connection pool healthy'
-                    : (databaseCheck?.detail ?? 'PostgreSQL + pgvector')
-                }
-              />
-            </div>
-
-            <dl className="grid grid-cols-2 gap-px border-t border-ink-700/60 bg-ink-700/40 text-xs sm:grid-cols-3">
-              <div className="bg-ink-900 px-5 py-3">
-                <dt className="text-mist-500">Endpoint</dt>
-                <dd className="mt-1 truncate font-mono text-mist-300" title={API_BASE_URL}>
-                  {API_BASE_URL}
-                </dd>
-              </div>
-              <div className="bg-ink-900 px-5 py-3">
-                <dt className="text-mist-500">Round trip</dt>
-                <dd className="mt-1 font-mono text-mist-300">
-                  {latencyMs === null ? '—' : `${latencyMs} ms`}
-                </dd>
-              </div>
-              <div className="col-span-2 bg-ink-900 px-5 py-3 sm:col-span-1">
-                <dt className="text-mist-500">Last checked</dt>
-                <dd className="mt-1 font-mono text-mist-300">
-                  {lastCheckedAt?.toLocaleTimeString() ?? '—'}
-                </dd>
-              </div>
-            </dl>
-          </section>
-
-          {!isLoading && !databaseIsUp && apiIsUp && (
-            <p className="mt-4 rounded-lg border border-warn-400/25 bg-warn-400/5 px-4 py-3 text-xs leading-relaxed text-mist-300">
-              <span className="font-medium text-warn-400">Database offline.</span>{' '}
-              The API is healthy and correctly reporting that PostgreSQL is not
-              reachable. Start it with{' '}
-              <code className="rounded bg-ink-800 px-1.5 py-0.5 font-mono text-mist-100">
-                docker compose up -d
-              </code>{' '}
-              from the project root.
-            </p>
-          )}
-        </main>
-
-        <footer className="mt-auto pt-12 text-xs text-mist-500">
-          Phase 1 — Foundation. The workspace interface arrives in Phase 3.
-        </footer>
-      </div>
-    </div>
+      <Route
+        path="/signup"
+        element={
+          <RedirectIfAuthenticated>
+            <SignupPage />
+          </RedirectIfAuthenticated>
+        }
+      />
+      <Route
+        path="/"
+        element={
+          <RequireAuth>
+            <StatusPage />
+          </RequireAuth>
+        }
+      />
+      {/* Unknown URL: send them home rather than rendering a blank page. */}
+      <Route path="*" element={<Navigate to="/" replace />} />
+    </Routes>
   )
 }

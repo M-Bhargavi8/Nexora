@@ -69,9 +69,33 @@ orphaned AF_UNIX socket reparse points left by an unclean shutdown
 rather than an error. Fixed by renaming the parent directories so Docker
 recreates them.
 
-## Phase 2 — Authentication ⚪
+## Phase 2 — Authentication ✅
 Signup, login, logout, password hashing, protected routes, session/token
 handling, per-user data isolation. Tested thoroughly.
+
+**Delivered and verified (2026-08-22):**
+- Argon2id password hashing, with transparent rehash on login
+- Session tokens: 256 bits of randomness, only the SHA-256 hash stored, so a
+  database dump contains no usable credential
+- httpOnly + SameSite=lax session cookie; the token is never in JavaScript,
+  localStorage or sessionStorage
+- Uniform 401 for every failure mode, and a dummy Argon2 verification when the
+  email is unknown, so response time does not reveal which emails are registered
+- CSRF origin checking on state-changing methods
+- Two-dimensional login rate limiting (per-IP and per-account), counting only
+  failures, resetting the account counter on a genuine sign-in
+- React Router with a `RequireAuth` guard, session restoration on load, and
+  redirects in both directions
+- **153 backend tests, 26 frontend tests**, all passing
+
+**Known limitations, stated deliberately:**
+- The rate limiter is in-process. Multiple workers each keep their own counters;
+  a distributed limiter needs Redis, which arrives in a later phase.
+- Signup returns 409 for a duplicate email, which confirms that an address is
+  registered. Closing that needs email delivery, which does not exist yet.
+- Behind a reverse proxy every request appears to come from the proxy, so
+  production must read `X-Forwarded-For` from a *trusted* proxy only.
+- No password reset or change flow — out of scope for this phase.
 
 ## Phase 3 — Basic AI Chat ⚪
 User → React → FastAPI → AI Gateway → Model Provider → streaming response →

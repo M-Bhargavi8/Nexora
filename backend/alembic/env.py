@@ -32,15 +32,25 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app.core.config import get_settings  # noqa: E402
 from app.db.base import Base  # noqa: E402
 
-# NOTE (Phase 2 onward): every model module must be imported here, or its
-# table will be missing from Base.metadata and autogenerate will silently
-# produce a migration that drops it. There are no models yet.
-# e.g. from app.models import user  # noqa: F401
+# Importing the models package registers every model on Base.metadata. Skip
+# this and autogenerate sees an empty schema and generates migrations that
+# drop all our tables.
+import app.models  # noqa: F401,E402
 
 config = context.config
 
-# Inject the real connection URL at runtime.
-config.set_main_option("sqlalchemy.url", str(get_settings().database_url))
+# Inject the connection URL at runtime.
+#
+# By default this is the application's configured PostgreSQL database. It can
+# be overridden per-invocation with alembic's standard -x flag:
+#
+#     alembic -x db_url=sqlite+aiosqlite:///./check.db upgrade head
+#
+# which is how the migration is exercised against a throwaway database
+# without touching real data or editing any file.
+_x_arguments = context.get_x_argument(as_dictionary=True)
+_database_url = _x_arguments.get("db_url") or str(get_settings().database_url)
+config.set_main_option("sqlalchemy.url", _database_url)
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)

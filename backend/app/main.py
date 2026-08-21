@@ -17,9 +17,11 @@ from fastapi.responses import JSONResponse
 from app import __version__
 from app.api.router import api_router
 from app.core.config import Settings, get_settings
+from app.core.csrf import CSRFProtectionMiddleware
 from app.core.logging import configure_logging, get_logger
 from app.core.middleware import RequestContextMiddleware
 from app.db.session import dispose_engine
+from app.services.auth import warm_timing_defence
 
 logger = get_logger(__name__)
 
@@ -45,6 +47,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         __version__,
         settings.app_env,
     )
+
+    # Precompute the Argon2 hash that equalises response time for logins with
+    # an unknown email. Done here rather than at import so that alembic, the
+    # test suite and any CLI tool do not each pay ~50ms for it -- and done at
+    # startup rather than lazily so the *first* such login is not the one
+    # request that stands out as slow.
+    warm_timing_defence()
+
     yield
     await dispose_engine()
     logger.info("%s shut down cleanly", settings.app_name)
@@ -81,6 +91,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
         allow_headers=["Authorization", "Content-Type", "X-Request-ID"],
         expose_headers=["X-Request-ID"],
+    )
+    # Starlette's add_middleware *prepends*, so the last one added ends up
+    # outermost. The real execution order is therefore:
+    #
+    #     RequestContext -> CSRF -> CORS -> route handler
+    #
+    # CSRF runs *before* CORS, not inside it. That is fine, and marginally
+    # safer, since a forged cross-origin POST is rejected earlier. The one
+    # consequence worth knowing when debugging: a CSRF 403 never travels back
+    # out through CORSMiddleware, so it carries no Access-Control-Allow-Origin
+    # header and the browser reports it as a CORS failure instead of showing
+    # the 403 body.
+    #
+    # This is the second layer behind the cookie's SameSite attribute, not the
+    # first.
+    app.add_middleware(
+        CSRFProtectionMiddleware, allowed_origins=settings.cors_origin_list
     )
     app.add_middleware(RequestContextMiddleware)
 
