@@ -13,6 +13,7 @@ from app.core.clock import utcnow
 from app.db.base import Base
 
 if TYPE_CHECKING:  # imported only for type checking, avoids a circular import
+    from app.models.conversation import Conversation
     from app.models.session import UserSession
 
 # 64 characters for the local part + "@" + 255 for the domain is the maximum
@@ -64,6 +65,14 @@ class User(Base):
         back_populates="user",
         # Deleting a user deletes their sessions, so no orphaned session can
         # authenticate as a user who no longer exists.
+        cascade="all, delete-orphan",
+    )
+
+    conversations: Mapped[list[Conversation]] = relationship(
+        back_populates="user",
+        # Deleting a user removes their conversations, and the messages inside
+        # them cascade in turn. Deleting an account should not leave its chat
+        # history readable in the database.
         cascade="all, delete-orphan",
     )
 
