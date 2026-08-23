@@ -97,10 +97,41 @@ handling, per-user data isolation. Tested thoroughly.
   production must read `X-Forwarded-For` from a *trusted* proxy only.
 - No password reset or change flow — out of scope for this phase.
 
-## Phase 3 — Basic AI Chat ⚪
+## Phase 3 — Basic AI Chat ✅
 User → React → FastAPI → AI Gateway → Model Provider → streaming response →
 React. New chat, streaming, save messages, history, markdown, code blocks,
 stop generation, regenerate.
+
+**Delivered and verified (2026-08-23):**
+- Provider-independent AI gateway; an offline `echo` provider so the whole
+  streaming path is testable without calling — or paying for — a real model
+- `POST /chat` streams `start` / `delta` / `error` / `done` over SSE; the reply
+  is persisted as it completes, so a dropped connection loses nothing
+- `POST /chat/regenerate` discards the last answer and streams a new one to the
+  **stored** question, so the client cannot substitute a different question and
+  have it attributed to the original turn
+- Stop generation via `AbortController`; partial text is kept, since the server
+  already saved it and hiding it would show less than exists
+- Markdown and syntax-highlighted code blocks, with copy-to-clipboard
+- Conversation history in the sidebar, scoped to the signed-in user
+- Per-user rate limiting on both send and regenerate — regenerating costs a
+  full model call and is the easiest thing in the product to sit and hammer
+- **241 backend tests, 90 frontend tests**, all passing
+
+**Verified against the running stack, not just tests:** signed up through the
+UI, sent a message, watched it stream, confirmed markdown/table/code rendering,
+pressed *Regenerate reply*, confirmed `POST /chat/regenerate → 200`, and queried
+PostgreSQL directly to confirm the conversation still held exactly one question
+and one answer at contiguous positions — the old reply was replaced, not
+duplicated. Test account deleted afterwards.
+
+**Known limitations, stated deliberately:**
+- The only provider wired up is `echo`. Nothing here proves a real model
+  provider works; that needs credentials and an actual call.
+- Regenerating discards the previous answer. There is no way to compare
+  alternative replies, which would need a notion of which reply later turns
+  build on — not needed in this phase.
+- Editing an earlier message is not implemented (Phase 4).
 
 ## Phase 4 — Conversation Management ⚪
 Rename, delete, search, history pagination, message editing.
