@@ -49,9 +49,10 @@ from sqlalchemy.pool import StaticPool  # noqa: E402
 
 import app.models  # noqa: F401,E402  registers models on Base.metadata
 from app.api.routes.auth import reset_auth_rate_limits  # noqa: E402
+from app.api.routes.chat import reset_chat_rate_limits  # noqa: E402
 from app.core.config import Settings, get_settings  # noqa: E402
 from app.db.base import Base  # noqa: E402
-from app.db.session import get_db  # noqa: E402
+from app.db.session import get_db, get_db_session_factory  # noqa: E402
 from app.main import create_app  # noqa: E402
 
 
@@ -74,6 +75,7 @@ def reset_rate_limiter() -> None:
     would leave exactly this kind of cross-test bleed.
     """
     reset_auth_rate_limits()
+    reset_chat_rate_limits()
 
 
 @pytest.fixture
@@ -141,6 +143,10 @@ def app(
             yield session
 
     application.dependency_overrides[get_db] = override_get_db
+    # Streaming endpoints open their own session after the request scope
+    # closes, so they ask for the factory rather than a session. Without this
+    # override they would reach past the test database into the real one.
+    application.dependency_overrides[get_db_session_factory] = lambda: session_factory
     return application
 
 

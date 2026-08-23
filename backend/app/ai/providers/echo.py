@@ -22,7 +22,14 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator, Sequence
 
-from app.ai.base import ChatMessage, ModelProvider, ModelProviderError
+from app.ai.base import (
+    ChatMessage,
+    ModelProvider,
+    ModelProviderError,
+    StreamEvent,
+    TextDelta,
+    Usage,
+)
 
 # Chunked the way a real stream arrives: several words at a time, mid-sentence
 # boundaries included, so the UI is exercised against realistic fragments
@@ -51,14 +58,14 @@ class EchoProvider(ModelProvider):
         messages: Sequence[ChatMessage],
         *,
         system: str | None = None,
-    ) -> AsyncIterator[str]:
+    ) -> AsyncIterator[StreamEvent]:
         if not messages:
             raise ModelProviderError("Cannot stream a reply with no messages")
 
         for chunk in _REPLY_CHUNKS:
             if self._chunk_delay_seconds:
                 await asyncio.sleep(self._chunk_delay_seconds)
-            yield chunk
+            yield TextDelta(chunk)
 
         # Echo the most recent user turn so a test can assert the provider
         # actually received the conversation, not just that *something*
@@ -67,4 +74,10 @@ class EchoProvider(ModelProvider):
             (m.content for m in reversed(messages) if m.role == "user"),
             "",
         )
-        yield repr(last_user)
+        yield TextDelta(repr(last_user))
+
+        # Token counts are genuinely unknown here, and are reported as such.
+        # `model` is still worth recording: it makes every message this
+        # provider produced identifiable in the database, so canned replies can
+        # never be mistaken later for something a real model said.
+        yield Usage(model=self.name)

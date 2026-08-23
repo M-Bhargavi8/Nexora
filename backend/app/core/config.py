@@ -86,6 +86,17 @@ class Settings(BaseSettings):
     # password five times in a minute, while an attacker does nothing else.
     auth_account_rate_limit_attempts: int = 5
 
+    # --- Chat rate limiting ---
+    # Keyed by user, not by IP: this endpoint is authenticated, and the cost
+    # it incurs is attributable to an account rather than an address. An
+    # office full of people behind one NAT should not share a model budget.
+    #
+    # SECURITY/COST: unlike the auth limiter, which exists to slow password
+    # guessing, this one exists because every request spends money. An
+    # unlimited paid endpoint is a financial denial of service.
+    chat_rate_limit_attempts: int = 30
+    chat_rate_limit_window_seconds: int = 60
+
     # --- AI ---
     # Which adapter the gateway builds. Changing providers is this value plus
     # a restart -- never a code change. See app/ai/gateway.py.

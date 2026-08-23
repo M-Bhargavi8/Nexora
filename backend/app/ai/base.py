@@ -31,6 +31,43 @@ Role = Literal["user", "assistant"]
 
 
 @dataclass(frozen=True, slots=True)
+class TextDelta:
+    """A piece of the reply as it is generated.
+
+    Chunks are fragments, not tokens and not whole words. Concatenate them;
+    never treat one as meaningful on its own.
+    """
+
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
+class Usage:
+    """Reported once, after the reply is complete.
+
+    Why the stream yields this rather than only text: the message columns that
+    record what a turn cost have to be filled from somewhere, and a side
+    channel (a mutable dict passed in, a `last_usage()` method) would be
+    stateful and racy under concurrency. An event in the stream is explicit
+    and cannot be read for the wrong request.
+
+    Token counts are optional because not every provider reports them -- the
+    offline one genuinely has none, and inventing plausible numbers would put
+    fiction in a cost column.
+    """
+
+    model: str
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+
+
+#: What a provider yields. A union rather than a bare string so that usage can
+#: travel with the reply. Kept to exactly these two members: tool-call events
+#: arrive in Phase 7, when there is something that actually emits them.
+StreamEvent = TextDelta | Usage
+
+
+@dataclass(frozen=True, slots=True)
 class ChatMessage:
     """One turn of a conversation, in provider-neutral form.
 
@@ -79,8 +116,11 @@ class ModelProvider(ABC):
         messages: Sequence[ChatMessage],
         *,
         system: str | None = None,
-    ) -> AsyncIterator[str]:
-        """Stream a reply as a sequence of text chunks.
+    ) -> AsyncIterator[StreamEvent]:
+        """Stream a reply as a sequence of events.
+
+        Yields `TextDelta` for each fragment of the reply, then at most one
+        `Usage` once the reply is complete.
 
         Declared as a normal `def` returning an `AsyncIterator`, not as
         `async def`. Implementations are async generators, and an async
@@ -88,10 +128,6 @@ class ModelProvider(ABC):
         returning a coroutine that must be awaited first. Typing it this way
         means callers write `async for chunk in provider.stream(...)` without
         an extra `await`, and the type checker agrees with them.
-
-        Chunks are pieces of text, not tokens and not whole words -- a caller
-        must concatenate them and must not assume any chunk is meaningful on
-        its own.
 
         Raises a `ModelProviderError` subclass on failure.
         """

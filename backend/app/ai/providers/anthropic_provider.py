@@ -24,6 +24,9 @@ from app.ai.base import (
     ModelProviderError,
     ModelRateLimitError,
     ModelUnavailableError,
+    StreamEvent,
+    TextDelta,
+    Usage,
 )
 from app.core.logging import get_logger
 
@@ -54,8 +57,8 @@ class AnthropicProvider(ModelProvider):
         messages: Sequence[ChatMessage],
         *,
         system: str | None = None,
-    ) -> AsyncIterator[str]:
-        """Stream Claude's reply as text chunks."""
+    ) -> AsyncIterator[StreamEvent]:
+        """Stream Claude's reply, then report what it cost."""
         if not messages:
             # The API rejects an empty conversation, but with a less obvious
             # message than this one.
@@ -83,7 +86,18 @@ class AnthropicProvider(ModelProvider):
         try:
             async with self._client.messages.stream(**request) as stream:
                 async for chunk in stream.text_stream:
-                    yield chunk
+                    yield TextDelta(chunk)
+
+                # Available only once the stream is exhausted -- token counts
+                # are not known until generation finishes. The SDK accumulated
+                # the message for us while we were iterating, so this is not a
+                # second request.
+                final = await stream.get_final_message()
+                yield Usage(
+                    model=getattr(final, "model", self._model),
+                    input_tokens=getattr(final.usage, "input_tokens", None),
+                    output_tokens=getattr(final.usage, "output_tokens", None),
+                )
         except anthropic.AuthenticationError as exc:
             # Never let the key or the provider's wording reach the caller.
             logger.error("Model provider rejected our credentials")

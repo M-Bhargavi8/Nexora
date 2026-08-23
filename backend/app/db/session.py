@@ -94,6 +94,22 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
             raise
 
 
+def get_db_session_factory() -> async_sessionmaker[AsyncSession]:
+    """FastAPI dependency that yields the session *factory*, not a session.
+
+    Streaming endpoints need this. Their response body is produced after the
+    request scope has closed, so the per-request session from `get_db` is
+    already gone by the time they need to write anything. They open a session
+    of their own instead.
+
+    It is a dependency rather than a direct call to `get_session_factory()`
+    for one practical reason: tests override it exactly as they override
+    `get_db`, so a streaming endpoint writes to the test database instead of
+    quietly reaching past the override into the real one.
+    """
+    return get_session_factory()
+
+
 async def _ping_database() -> None:
     """Run the cheapest possible query that proves the database answers."""
     engine = get_engine()

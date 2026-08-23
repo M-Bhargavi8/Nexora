@@ -10,7 +10,14 @@ from collections.abc import Iterator, Sequence
 
 import pytest
 
-from app.ai.base import ChatMessage, ModelProvider, ModelProviderError
+from app.ai.base import (
+    ChatMessage,
+    ModelProvider,
+    ModelProviderError,
+    StreamEvent,
+    TextDelta,
+    Usage,
+)
 from app.ai.gateway import get_provider
 from app.ai.providers.echo import EchoProvider
 from app.core.config import Settings
@@ -36,24 +43,35 @@ def clear_provider_cache() -> Iterator[None]:
     get_provider.cache_clear()
 
 
-async def collect(provider: ModelProvider, messages: Sequence[ChatMessage]) -> list[str]:
-    return [chunk async for chunk in provider.stream(messages)]
+async def collect(
+    provider: ModelProvider, messages: Sequence[ChatMessage]
+) -> list[StreamEvent]:
+    return [event async for event in provider.stream(messages)]
+
+
+async def collect_text(
+    provider: ModelProvider, messages: Sequence[ChatMessage]
+) -> str:
+    return "".join(
+        event.text for event in await collect(provider, messages)
+        if isinstance(event, TextDelta)
+    )
 
 
 class TestEchoProvider:
     async def test_streams_more_than_one_chunk(self) -> None:
         """If it returned everything at once, the streaming path downstream
         would never actually be exercised."""
-        chunks = await collect(EchoProvider(), [ChatMessage("user", "hello")])
+        events = await collect(EchoProvider(), [ChatMessage("user", "hello")])
 
-        assert len(chunks) > 1
+        assert sum(isinstance(e, TextDelta) for e in events) > 1
 
     async def test_echoes_the_last_user_message(self) -> None:
         """Proves the provider really received the conversation, rather than
         just emitting canned text regardless of input."""
-        chunks = await collect(EchoProvider(), [ChatMessage("user", "marmalade")])
+        text = await collect_text(EchoProvider(), [ChatMessage("user", "marmalade")])
 
-        assert "marmalade" in "".join(chunks)
+        assert "marmalade" in text
 
     async def test_echoes_the_most_recent_user_turn_not_the_first(self) -> None:
         conversation = [
@@ -62,7 +80,7 @@ class TestEchoProvider:
             ChatMessage("user", "second question"),
         ]
 
-        text = "".join(await collect(EchoProvider(), conversation))
+        text = await collect_text(EchoProvider(), conversation)
 
         assert "second question" in text
         assert "first question" not in text
@@ -71,10 +89,22 @@ class TestEchoProvider:
         with pytest.raises(ModelProviderError):
             await collect(EchoProvider(), [])
 
+    async def test_reports_which_provider_answered(self) -> None:
+        """Canned replies must stay identifiable, so they can never later be
+        mistaken for something a real model said."""
+        events = await collect(EchoProvider(), [ChatMessage("user", "hi")])
+
+        usage = [e for e in events if isinstance(e, Usage)]
+        assert len(usage) == 1
+        assert usage[0].model == "echo"
+        # Genuinely unknown here. Inventing plausible numbers would put
+        # fiction in a cost column.
+        assert usage[0].input_tokens is None
+
     async def test_says_plainly_that_it_is_not_a_real_model(self) -> None:
         """SECURITY-adjacent: canned text must never be mistaken for a model
         answer by whoever is reading the screen."""
-        text = "".join(await collect(EchoProvider(), [ChatMessage("user", "hi")]))
+        text = await collect_text(EchoProvider(), [ChatMessage("user", "hi")])
 
         assert "offline echo provider" in text.lower()
 

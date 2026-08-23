@@ -20,6 +20,8 @@ from app.ai.base import (
     ModelProviderError,
     ModelRateLimitError,
     ModelUnavailableError,
+    TextDelta,
+    Usage,
 )
 from app.ai.providers.anthropic_provider import AnthropicProvider
 
@@ -29,9 +31,25 @@ MESSAGES = [ChatMessage("user", "hello")]
 # --- a fake standing in for anthropic.AsyncAnthropic ------------------------
 
 
+class _FakeUsage:
+    input_tokens = 11
+    output_tokens = 22
+
+
+class _FakeFinalMessage:
+    model = "claude-opus-5"
+    usage = _FakeUsage()
+
+
 class _FakeStream:
     def __init__(self, chunks: Sequence[str]) -> None:
         self._chunks = chunks
+
+    async def get_final_message(self) -> _FakeFinalMessage:
+        """The SDK accumulates the message while the caller iterates, so this
+        is not a second request -- and token counts only exist once generation
+        has finished."""
+        return _FakeFinalMessage()
 
     async def __aenter__(self) -> _FakeStream:
         return self
@@ -82,8 +100,16 @@ def build_provider(
     return provider, client
 
 
-async def collect(provider: AnthropicProvider, **kwargs: Any) -> list[str]:
-    return [chunk async for chunk in provider.stream(MESSAGES, **kwargs)]
+async def collect(provider: AnthropicProvider, **kwargs: Any) -> list[Any]:
+    return [event async for event in provider.stream(MESSAGES, **kwargs)]
+
+
+async def collect_text(provider: AnthropicProvider, **kwargs: Any) -> list[str]:
+    return [
+        event.text
+        for event in await collect(provider, **kwargs)
+        if isinstance(event, TextDelta)
+    ]
 
 
 # --- helpers for building real SDK exceptions -------------------------------
@@ -106,15 +132,36 @@ class TestStreaming:
     async def test_yields_each_chunk_in_order(self) -> None:
         provider, _ = build_provider(chunks=("Hel", "lo ", "world"))
 
-        assert await collect(provider) == ["Hel", "lo ", "world"]
+        assert await collect_text(provider) == ["Hel", "lo ", "world"]
 
     async def test_rejects_an_empty_conversation(self) -> None:
         provider, client = build_provider()
 
         with pytest.raises(ModelProviderError):
-            [c async for c in provider.stream([])]
+            [event async for event in provider.stream([])]
 
         assert client.messages.calls == [], "must not call the API at all"
+
+    async def test_reports_token_usage_after_the_reply(self) -> None:
+        """The message columns that record what a turn cost have to be filled
+        from somewhere, and token counts do not exist until generation ends."""
+        provider, _ = build_provider()
+
+        events = await collect(provider)
+
+        usage = [e for e in events if isinstance(e, Usage)]
+        assert len(usage) == 1
+        assert usage[0].model == "claude-opus-5"
+        assert usage[0].input_tokens == 11
+        assert usage[0].output_tokens == 22
+
+    async def test_usage_arrives_after_every_text_chunk(self) -> None:
+        provider, _ = build_provider(chunks=("a", "b", "c"))
+
+        events = await collect(provider)
+
+        assert isinstance(events[-1], Usage)
+        assert all(isinstance(e, TextDelta) for e in events[:-1])
 
 
 class TestRequestShape:
@@ -134,7 +181,7 @@ class TestRequestShape:
             ChatMessage("assistant", "second"),
         ]
 
-        [c async for c in provider.stream(conversation)]
+        [event async for event in provider.stream(conversation)]
 
         assert client.messages.calls[0]["messages"] == [
             {"role": "user", "content": "first"},
