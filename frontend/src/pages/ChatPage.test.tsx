@@ -30,6 +30,7 @@ vi.mock('../lib/api', async (importOriginal) => {
 
 vi.mock('../lib/chat', () => ({
   streamChat: vi.fn(),
+  regenerate: vi.fn(),
   listConversations: vi.fn(),
   getConversation: vi.fn(),
 }))
@@ -201,5 +202,108 @@ describe('starting a new chat', () => {
       expect(screen.queryByText('first question')).not.toBeInTheDocument(),
     )
     expect(screen.getByText(/Ask a question to begin/)).toBeInTheDocument()
+  })
+})
+
+describe('regenerating', () => {
+  it('offers no regenerate button before anything has been asked', async () => {
+    renderChatPage()
+    await screen.findByLabelText('Message')
+
+    expect(
+      screen.queryByRole('button', { name: 'Regenerate reply' }),
+    ).not.toBeInTheDocument()
+  })
+
+  it('offers it once a reply has completed', async () => {
+    renderChatPage()
+    const composer = await screen.findByLabelText('Message')
+
+    await userEvent.type(composer, 'a question{Enter}')
+
+    expect(
+      await screen.findByRole('button', { name: 'Regenerate reply' }),
+    ).toBeInTheDocument()
+  })
+
+  it('replaces the answer on screen', async () => {
+    renderChatPage()
+    const composer = await screen.findByLabelText('Message')
+    await userEvent.type(composer, 'a question{Enter}')
+    await screen.findByText('Hello there')
+
+    vi.mocked(chatApi.regenerate).mockImplementation(async ({ onEvent }) => {
+      onEvent({ type: 'start', conversation_id: 'c1', user_message_id: 'u1' })
+      onEvent({ type: 'delta', text: 'A different answer' })
+      onEvent({
+        type: 'done',
+        conversation_id: 'c1',
+        message_id: 'm2',
+        model: 'echo',
+        input_tokens: null,
+        output_tokens: null,
+      })
+    })
+    await userEvent.click(
+      screen.getByRole('button', { name: 'Regenerate reply' }),
+    )
+
+    expect(await screen.findByText('A different answer')).toBeInTheDocument()
+    // Two answers to one question would misrepresent what is stored.
+    expect(screen.queryByText('Hello there')).not.toBeInTheDocument()
+    expect(screen.getByText('a question')).toBeInTheDocument()
+  })
+})
+
+describe('stopping', () => {
+  it('swaps Send for Stop while a reply is streaming', async () => {
+    // A stream that never settles, so the UI stays in its streaming state.
+    vi.mocked(chatApi.streamChat).mockImplementation(async ({ onEvent }) => {
+      onEvent({ type: 'start', conversation_id: 'c1', user_message_id: 'u1' })
+      onEvent({ type: 'delta', text: 'thinking…' })
+      await new Promise(() => {})
+    })
+    renderChatPage()
+    const composer = await screen.findByLabelText('Message')
+
+    await userEvent.type(composer, 'a question{Enter}')
+
+    expect(await screen.findByRole('button', { name: 'Stop' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Send' })).not.toBeInTheDocument()
+  })
+
+  it('aborts the request when Stop is pressed', async () => {
+    let capturedSignal: AbortSignal | undefined
+    vi.mocked(chatApi.streamChat).mockImplementation(async ({ onEvent, signal }) => {
+      capturedSignal = signal
+      onEvent({ type: 'start', conversation_id: 'c1', user_message_id: 'u1' })
+      onEvent({ type: 'delta', text: 'partial' })
+      await new Promise(() => {})
+    })
+    renderChatPage()
+    const composer = await screen.findByLabelText('Message')
+    await userEvent.type(composer, 'a question{Enter}')
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Stop' }))
+
+    // The signal is what actually closes the connection; without it the
+    // server keeps generating -- and keeps billing.
+    expect(capturedSignal?.aborted).toBe(true)
+  })
+
+  it('keeps the partial text after stopping', async () => {
+    vi.mocked(chatApi.streamChat).mockImplementation(async ({ onEvent }) => {
+      onEvent({ type: 'start', conversation_id: 'c1', user_message_id: 'u1' })
+      onEvent({ type: 'delta', text: 'half an answer' })
+      await new Promise(() => {})
+    })
+    renderChatPage()
+    const composer = await screen.findByLabelText('Message')
+    await userEvent.type(composer, 'a question{Enter}')
+    await screen.findByText('half an answer')
+
+    await userEvent.click(screen.getByRole('button', { name: 'Stop' }))
+
+    expect(screen.getByText('half an answer')).toBeInTheDocument()
   })
 })

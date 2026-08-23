@@ -46,12 +46,15 @@ from app.schemas.chat import (
     ConversationDetailResponse,
     ConversationResponse,
     MessageResponse,
+    RegenerateRequest,
 )
 from app.services.chat import (
     append_message,
     create_conversation,
     derive_title,
+    drop_trailing_assistant_message,
     get_conversation,
+    last_message,
     list_conversations,
     load_history,
 )
@@ -273,6 +276,76 @@ async def send_message(
         headers={
             # Without this a proxy may hold the whole response and deliver it
             # at once, which looks exactly like streaming being broken.
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
+
+
+@router.post(
+    "/regenerate",
+    summary="Replace the last reply with a fresh one",
+    description=(
+        "Discards the most recent assistant reply and streams a new answer to "
+        "the same question. Returns a `text/event-stream`, exactly like /chat."
+    ),
+    responses={
+        404: {"description": "No such conversation for this user"},
+        409: {"description": "There is no question to answer"},
+        429: {"description": "Too many requests"},
+    },
+)
+async def regenerate(
+    payload: RegenerateRequest,
+    request: Request,
+    db: DbSession,
+    user: CurrentUser,
+    session_factory: SessionFactory,
+) -> StreamingResponse:
+    """Throw away the last answer and produce another one.
+
+    Rate limited on the same counter as sending, because it costs exactly the
+    same as sending: a full request to the model. Regenerating is also the
+    easiest thing in the product to sit and hammer.
+    """
+    if not chat_rate_limiter.allow(f"chat:{user.id}"):
+        logger.warning("Chat rate limit exceeded", extra={"user_id": str(user.id)})
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many messages. Please wait a moment and try again.",
+            headers={"Retry-After": str(chat_rate_limiter.window_seconds)},
+        )
+
+    conversation = await get_conversation(
+        db, conversation_id=payload.conversation_id, user_id=user.id
+    )
+    if conversation is None:
+        raise _CONVERSATION_NOT_FOUND
+
+    # Returns False when the previous attempt produced no text at all, in which
+    # case the user turn is already last and there is nothing to discard.
+    await drop_trailing_assistant_message(db, conversation_id=conversation.id)
+
+    history = await load_history(db, conversation_id=conversation.id)
+    question = await last_message(db, conversation_id=conversation.id)
+
+    # After dropping the reply the thread must end on a question. An empty
+    # conversation, or one somehow ending on an assistant turn, has nothing to
+    # regenerate -- and sending it to a provider would be rejected there with a
+    # far less obvious message.
+    if question is None or question.role is not MessageRole.USER:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="There is no question to regenerate an answer for.",
+        )
+
+    return StreamingResponse(
+        # No *new* user message exists, so the `start` event reports the
+        # existing question -- which is the turn being answered.
+        _stream_reply(session_factory, conversation.id, question.id, history),
+        media_type="text/event-stream",
+        headers={
             "Cache-Control": "no-cache",
             "X-Accel-Buffering": "no",
             "Connection": "keep-alive",

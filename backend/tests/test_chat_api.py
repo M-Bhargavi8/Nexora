@@ -25,6 +25,7 @@ from app.ai.base import (
 from app.ai.providers.echo import EchoProvider
 from app.api.routes.chat import _stream_reply
 from app.models.message import Message, MessageRole
+from app.models.user import User
 from app.schemas.chat import MAX_MESSAGE_LENGTH
 from app.services.auth import create_user
 from app.services.chat import append_message, create_conversation, load_history
@@ -584,3 +585,174 @@ class TestProviderFailures:
             await db.execute(select(Message).where(Message.role == MessageRole.USER))
         ).scalar_one()
         assert user_message.content == "hello"
+
+
+async def regenerate(
+    client: AsyncClient, conversation_id: str
+) -> list[dict[str, Any]]:
+    events: list[dict[str, Any]] = []
+    async with client.stream(
+        "POST", f"{API}/chat/regenerate", json={"conversation_id": conversation_id}
+    ) as response:
+        assert response.status_code == 200, await response.aread()
+        async for line in response.aiter_lines():
+            if line.startswith("data: "):
+                events.append(json.loads(line[len("data: ") :]))
+    return events
+
+
+class TestRegenerate:
+    async def test_requires_a_session(self, client: AsyncClient) -> None:
+        response = await client.post(
+            f"{API}/chat/regenerate",
+            json={"conversation_id": "11111111-1111-1111-1111-111111111111"},
+        )
+
+        assert response.status_code == 401
+
+    async def test_replaces_the_previous_reply_rather_than_adding_one(
+        self, client: AsyncClient, db: AsyncSession
+    ) -> None:
+        """Regenerating means the old answer is discarded. Keeping both would
+        need a notion of alternative replies that nothing here has."""
+        await sign_up(client)
+        events = await stream_chat(client, "hello")
+        conversation_id = first(events, "start")["conversation_id"]
+
+        await regenerate(client, conversation_id)
+
+        stored = (
+            (await db.execute(select(Message).order_by(Message.position)))
+            .scalars()
+            .all()
+        )
+        assert [m.role for m in stored] == [MessageRole.USER, MessageRole.ASSISTANT]
+        assert [m.position for m in stored] == [0, 1]
+
+    async def test_the_question_is_kept(
+        self, client: AsyncClient, db: AsyncSession
+    ) -> None:
+        await sign_up(client)
+        events = await stream_chat(client, "what is a token?")
+        conversation_id = first(events, "start")["conversation_id"]
+
+        await regenerate(client, conversation_id)
+
+        user_message = (
+            await db.execute(select(Message).where(Message.role == MessageRole.USER))
+        ).scalar_one()
+        assert user_message.content == "what is a token?"
+
+    async def test_the_new_reply_answers_the_same_question(
+        self, client: AsyncClient
+    ) -> None:
+        """The echo provider repeats the last user turn, so this proves the
+        original question -- not an empty history -- reached the provider."""
+        await sign_up(client)
+        events = await stream_chat(client, "marmalade")
+        conversation_id = first(events, "start")["conversation_id"]
+
+        again = await regenerate(client, conversation_id)
+
+        assert "marmalade" in texts(again)
+
+    async def test_start_reports_the_question_being_answered(
+        self, client: AsyncClient
+    ) -> None:
+        await sign_up(client)
+        events = await stream_chat(client, "hello")
+        conversation_id = first(events, "start")["conversation_id"]
+        original_question_id = first(events, "start")["user_message_id"]
+
+        again = await regenerate(client, conversation_id)
+
+        assert first(again, "start")["user_message_id"] == original_question_id
+
+    async def test_regenerating_twice_still_leaves_one_reply(
+        self, client: AsyncClient, db: AsyncSession
+    ) -> None:
+        await sign_up(client)
+        events = await stream_chat(client, "hello")
+        conversation_id = first(events, "start")["conversation_id"]
+
+        await regenerate(client, conversation_id)
+        await regenerate(client, conversation_id)
+
+        assert len((await db.execute(select(Message))).scalars().all()) == 2
+
+    async def test_works_after_a_reply_that_produced_nothing(
+        self, client: AsyncClient, db: AsyncSession, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failed attempt leaves the question last with no reply after it.
+        There is nothing to discard, and regenerating must still work."""
+        await sign_up(client)
+        monkeypatch.setattr(
+            "app.api.routes.chat.get_provider",
+            lambda: _FailingProvider(ModelUnavailableError("gone")),
+        )
+        async with client.stream(
+            "POST", f"{API}/chat", json={"content": "hello"}
+        ) as response:
+            conversation_id = None
+            async for line in response.aiter_lines():
+                if line.startswith("data: "):
+                    event = json.loads(line[len("data: ") :])
+                    if event["type"] == "start":
+                        conversation_id = event["conversation_id"]
+        assert conversation_id is not None
+        monkeypatch.undo()
+
+        again = await regenerate(client, conversation_id)
+
+        assert first(again, "done")
+        stored = (
+            (await db.execute(select(Message).order_by(Message.position)))
+            .scalars()
+            .all()
+        )
+        assert [m.role for m in stored] == [MessageRole.USER, MessageRole.ASSISTANT]
+
+    async def test_refuses_an_empty_conversation(
+        self, client: AsyncClient, db: AsyncSession
+    ) -> None:
+        await sign_up(client)
+        user = (await db.execute(select(User))).scalar_one()
+        empty = await create_conversation(db, user_id=user.id, title="empty")
+
+        response = await client.post(
+            f"{API}/chat/regenerate", json={"conversation_id": str(empty.id)}
+        )
+
+        assert response.status_code == 409
+
+    async def test_another_users_conversation_cannot_be_regenerated(
+        self, client: AsyncClient
+    ) -> None:
+        await sign_up(client, "ada@example.com")
+        events = await stream_chat(client, "ada's question")
+        conversation_id = first(events, "start")["conversation_id"]
+        await client.post(f"{API}/auth/logout")
+        await sign_up(client, "mallory@example.com")
+
+        response = await client.post(
+            f"{API}/chat/regenerate", json={"conversation_id": conversation_id}
+        )
+
+        assert response.status_code == 404
+
+    async def test_is_rate_limited(self, client: AsyncClient) -> None:
+        """It costs exactly what sending costs, and is the easiest thing in the
+        product to sit and hammer."""
+        await sign_up(client)
+        events = await stream_chat(client, "hello")
+        conversation_id = first(events, "start")["conversation_id"]
+
+        statuses = []
+        for _ in range(35):
+            response = await client.post(
+                f"{API}/chat/regenerate", json={"conversation_id": conversation_id}
+            )
+            statuses.append(response.status_code)
+            await response.aclose()
+
+        assert 429 in statuses, f"never rate limited: {set(statuses)}"

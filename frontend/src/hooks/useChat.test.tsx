@@ -13,6 +13,7 @@ import { useChat } from './useChat'
 
 vi.mock('../lib/chat', () => ({
   streamChat: vi.fn(),
+  regenerate: vi.fn(),
   listConversations: vi.fn(),
   getConversation: vi.fn(),
 }))
@@ -40,8 +41,16 @@ const DONE: ChatEvent = {
 
 beforeEach(() => {
   vi.mocked(chatApi.streamChat).mockReset()
+  vi.mocked(chatApi.regenerate).mockReset()
   vi.mocked(chatApi.getConversation).mockReset()
 })
+
+/** Drive `regenerate` by replaying a fixed script of events. */
+function regenerateWith(events: ChatEvent[]) {
+  vi.mocked(chatApi.regenerate).mockImplementation(async ({ onEvent }) => {
+    for (const event of events) onEvent(event)
+  })
+}
 
 describe('sending a message', () => {
   it('shows the user turn and the reply', async () => {
@@ -297,5 +306,123 @@ describe('starting over', () => {
     })
 
     expect(vi.mocked(chatApi.streamChat).mock.calls[1][0].conversationId).toBeNull()
+  })
+})
+
+describe('regenerating', () => {
+  async function sendOnce(result: { current: ReturnType<typeof useChat> }) {
+    respondWith([START, { type: 'delta', text: 'first answer' }, DONE])
+    await act(async () => {
+      await result.current.send('a question')
+    })
+  }
+
+  it('replaces the previous reply rather than adding a second one', async () => {
+    const { result } = renderHook(() => useChat())
+    await sendOnce(result)
+    regenerateWith([START, { type: 'delta', text: 'second answer' }, DONE])
+
+    await act(async () => {
+      await result.current.regenerate()
+    })
+
+    // Showing two answers to one question would misrepresent what is stored:
+    // the server keeps exactly one.
+    expect(result.current.messages.map((m) => [m.role, m.content])).toEqual([
+      ['user', 'a question'],
+      ['assistant', 'second answer'],
+    ])
+  })
+
+  it('keeps the original question', async () => {
+    const { result } = renderHook(() => useChat())
+    await sendOnce(result)
+    regenerateWith([START, { type: 'delta', text: 'second answer' }, DONE])
+
+    await act(async () => {
+      await result.current.regenerate()
+    })
+
+    expect(result.current.messages[0].content).toBe('a question')
+  })
+
+  it('sends the conversation id and no message text', async () => {
+    const { result } = renderHook(() => useChat())
+    await sendOnce(result)
+    regenerateWith([START, DONE])
+
+    await act(async () => {
+      await result.current.regenerate()
+    })
+
+    // No `content`: the stored question is re-used, so a client cannot
+    // substitute a different one and have it attributed to the original turn.
+    expect(vi.mocked(chatApi.regenerate).mock.calls[0][0]).toMatchObject({
+      conversationId: 'c1',
+    })
+    expect(vi.mocked(chatApi.regenerate).mock.calls[0][0]).not.toHaveProperty(
+      'content',
+    )
+  })
+
+  it('does nothing when there is no conversation yet', async () => {
+    const { result } = renderHook(() => useChat())
+
+    await act(async () => {
+      await result.current.regenerate()
+    })
+
+    expect(chatApi.regenerate).not.toHaveBeenCalled()
+  })
+
+  it('surfaces a failure and keeps the partial text', async () => {
+    const { result } = renderHook(() => useChat())
+    await sendOnce(result)
+    regenerateWith([
+      START,
+      { type: 'delta', text: 'half' },
+      { type: 'error', code: 'provider_unavailable', message: 'Unavailable.' },
+    ])
+
+    await act(async () => {
+      await result.current.regenerate()
+    })
+
+    expect(result.current.error).toBe('Unavailable.')
+    expect(result.current.messages.at(-1)?.content).toBe('half')
+    expect(result.current.messages.at(-1)?.failed).toBe(true)
+  })
+})
+
+describe('canRegenerate', () => {
+  it('is false before anything has been said', () => {
+    const { result } = renderHook(() => useChat())
+
+    expect(result.current.canRegenerate).toBe(false)
+  })
+
+  it('is true once a reply has completed', async () => {
+    respondWith([START, { type: 'delta', text: 'answer' }, DONE])
+    const { result } = renderHook(() => useChat())
+
+    await act(async () => {
+      await result.current.send('question')
+    })
+
+    expect(result.current.canRegenerate).toBe(true)
+  })
+
+  it('is false again after starting a new chat', async () => {
+    respondWith([START, { type: 'delta', text: 'answer' }, DONE])
+    const { result } = renderHook(() => useChat())
+    await act(async () => {
+      await result.current.send('question')
+    })
+
+    act(() => {
+      result.current.reset()
+    })
+
+    expect(result.current.canRegenerate).toBe(false)
   })
 })

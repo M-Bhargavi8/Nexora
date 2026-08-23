@@ -37,6 +37,17 @@ class ChatRequest(BaseModel):
     )
 
 
+class RegenerateRequest(BaseModel):
+    """Ask for a fresh reply to the last question in a conversation.
+
+    No `content`: regenerating re-uses the question already stored, so the
+    client cannot quietly substitute a different one and have it attributed to
+    the original turn.
+    """
+
+    conversation_id: uuid.UUID
+
+
 class MessageResponse(BaseModel):
     """A stored message, as returned to its owner."""
 

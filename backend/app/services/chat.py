@@ -138,6 +138,57 @@ async def append_message(
     return message
 
 
+async def drop_trailing_assistant_message(
+    db: AsyncSession, *, conversation_id: uuid.UUID
+) -> bool:
+    """Remove the last message if it is an assistant turn. Returns whether it was.
+
+    What "regenerate" means: the previous answer is discarded and replaced,
+    not kept alongside the new one. Keeping both would need a notion of
+    alternative replies -- which reply is "the" answer, which one later turns
+    build on -- and nothing in this phase needs that.
+
+    Deleting the row rather than marking it superseded also keeps the
+    `position` sequence contiguous, so the new reply simply takes the position
+    the old one vacated.
+
+    Returns False when the last message is already a user turn, which happens
+    after a failed attempt that produced no text. That is not an error: there
+    is simply nothing to remove before regenerating.
+    """
+    result = await db.execute(
+        select(Message)
+        .where(Message.conversation_id == conversation_id)
+        .order_by(Message.position.desc())
+        .limit(1)
+    )
+    last = result.scalar_one_or_none()
+
+    if last is None or last.role is not MessageRole.ASSISTANT:
+        return False
+
+    await db.delete(last)
+    await db.commit()
+    logger.info(
+        "Discarded an assistant reply for regeneration",
+        extra={"conversation_id": str(conversation_id)},
+    )
+    return True
+
+
+async def last_message(
+    db: AsyncSession, *, conversation_id: uuid.UUID
+) -> Message | None:
+    """The most recent message in a conversation, or None if it is empty."""
+    result = await db.execute(
+        select(Message)
+        .where(Message.conversation_id == conversation_id)
+        .order_by(Message.position.desc())
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
 async def load_history(
     db: AsyncSession, *, conversation_id: uuid.UUID
 ) -> list[ChatMessage]:

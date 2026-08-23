@@ -12,6 +12,7 @@ import { useCallback, useRef, useState } from 'react'
 import { ApiError } from '../lib/api'
 import {
   getConversation,
+  regenerate as regenerateRequest,
   streamChat,
   type ChatEvent,
   type ChatMessageDto,
@@ -32,7 +33,10 @@ export interface UseChat {
   conversationId: string | null
   isStreaming: boolean
   error: string | null
+  /** Whether there is a completed answer that could be replaced. */
+  canRegenerate: boolean
   send: (content: string) => Promise<void>
+  regenerate: () => Promise<void>
   stop: () => void
   load: (conversationId: string) => Promise<void>
   reset: () => void
@@ -94,82 +98,147 @@ export function useChat(): UseChat {
     abortRef.current?.abort()
   }, [])
 
-  const send = useCallback(async (content: string) => {
-    const trimmed = content.trim()
-    if (!trimmed) return
+  /**
+   * Drive one streamed reply into the message identified by `assistantId`.
+   *
+   * Shared by `send` and `regenerate`, which differ only in which request they
+   * make and what they do to the transcript beforehand. Duplicating this would
+   * mean two copies of the abort handling and the failure rules.
+   */
+  const consume = useCallback(
+    async (
+      assistantId: string,
+      run: (
+        onEvent: (event: ChatEvent) => void,
+        signal: AbortSignal,
+      ) => Promise<void>,
+    ) => {
+      const controller = new AbortController()
+      abortRef.current = controller
+      setError(null)
+      setIsStreaming(true)
 
-    const controller = new AbortController()
-    abortRef.current = controller
-    setError(null)
-    setIsStreaming(true)
+      const markAssistant = (update: Partial<DisplayMessage>) =>
+        setMessages((current) =>
+          current.map((message) =>
+            message.id === assistantId ? { ...message, ...update } : message,
+          ),
+        )
+
+      const handleEvent = (event: ChatEvent) => {
+        switch (event.type) {
+          case 'start':
+            conversationIdRef.current = event.conversation_id
+            setConversationId(event.conversation_id)
+            break
+          case 'delta':
+            // Append rather than replace: each event carries one fragment, and
+            // no fragment is meaningful on its own.
+            setMessages((current) =>
+              current.map((message) =>
+                message.id === assistantId
+                  ? { ...message, content: message.content + event.text }
+                  : message,
+              ),
+            )
+            break
+          case 'error':
+            setError(event.message)
+            markAssistant({ pending: false, failed: true })
+            break
+          case 'done':
+            markAssistant({ pending: false })
+            break
+        }
+      }
+
+      try {
+        await run(handleEvent, controller.signal)
+      } catch (caught) {
+        if (controller.signal.aborted) {
+          // The user pressed Stop. Whatever arrived stays on screen -- the
+          // server has already saved it, so discarding it here would show less
+          // than actually exists. Stopping is a choice, not a failure, so the
+          // turn is not marked as failed and no error is shown.
+          markAssistant({ pending: false })
+        } else {
+          setError(
+            caught instanceof ApiError
+              ? caught.message
+              : 'Could not reach the assistant.',
+          )
+          markAssistant({ pending: false, failed: true })
+        }
+      } finally {
+        setIsStreaming(false)
+        abortRef.current = null
+      }
+    },
+    [],
+  )
+
+  const send = useCallback(
+    async (content: string) => {
+      const trimmed = content.trim()
+      if (!trimmed) return
+
+      const assistantId = localId('assistant')
+      setMessages((current) => [
+        ...current,
+        { id: localId('user'), role: 'user', content: trimmed },
+        { id: assistantId, role: 'assistant', content: '', pending: true },
+      ])
+
+      await consume(assistantId, (onEvent, signal) =>
+        streamChat({
+          content: trimmed,
+          conversationId: conversationIdRef.current,
+          onEvent,
+          signal,
+        }),
+      )
+    },
+    [consume],
+  )
+
+  const regenerate = useCallback(async () => {
+    const id = conversationIdRef.current
+    if (!id) return
 
     const assistantId = localId('assistant')
-    setMessages((current) => [
-      ...current,
-      { id: localId('user'), role: 'user', content: trimmed },
-      { id: assistantId, role: 'assistant', content: '', pending: true },
-    ])
+    setMessages((current) => {
+      // Drop the previous reply, mirroring what the server does. Leaving it in
+      // place would show two answers to one question while only one exists.
+      const withoutLastReply =
+        current.at(-1)?.role === 'assistant' ? current.slice(0, -1) : current
+      return [
+        ...withoutLastReply,
+        { id: assistantId, role: 'assistant', content: '', pending: true },
+      ]
+    })
 
-    const markAssistant = (update: Partial<DisplayMessage>) =>
-      setMessages((current) =>
-        current.map((message) =>
-          message.id === assistantId ? { ...message, ...update } : message,
-        ),
-      )
+    await consume(assistantId, (onEvent, signal) =>
+      regenerateRequest({ conversationId: id, onEvent, signal }),
+    )
+  }, [consume])
 
-    const handleEvent = (event: ChatEvent) => {
-      switch (event.type) {
-        case 'start':
-          conversationIdRef.current = event.conversation_id
-          setConversationId(event.conversation_id)
-          break
-        case 'delta':
-          // Append rather than replace: each event carries one fragment, and
-          // no fragment is meaningful on its own.
-          setMessages((current) =>
-            current.map((message) =>
-              message.id === assistantId
-                ? { ...message, content: message.content + event.text }
-                : message,
-            ),
-          )
-          break
-        case 'error':
-          setError(event.message)
-          markAssistant({ pending: false, failed: true })
-          break
-        case 'done':
-          markAssistant({ pending: false })
-          break
-      }
-    }
+  const lastMessage = messages.at(-1)
+  const canRegenerate =
+    !isStreaming &&
+    conversationId !== null &&
+    lastMessage?.role === 'assistant' &&
+    !lastMessage.pending
 
-    try {
-      await streamChat({
-        content: trimmed,
-        conversationId: conversationIdRef.current,
-        onEvent: handleEvent,
-        signal: controller.signal,
-      })
-    } catch (caught) {
-      if (controller.signal.aborted) {
-        // The user pressed Stop. Whatever arrived stays on screen -- the
-        // server has already saved it, so discarding it here would show less
-        // than actually exists.
-        markAssistant({ pending: false })
-      } else {
-        setError(
-          caught instanceof ApiError
-            ? caught.message
-            : 'Could not reach the assistant.',
-        )
-        markAssistant({ pending: false, failed: true })
-      }
-    } finally {
-      setIsStreaming(false)
-      abortRef.current = null
-    }
-  }, [])
-
-  return { messages, conversationId, isStreaming, error, send, stop, load, reset }
+  return {
+    messages,
+    conversationId,
+    isStreaming,
+    error,
+    canRegenerate,
+    send,
+    regenerate,
+    stop,
+    load,
+    reset,
+  }
 }

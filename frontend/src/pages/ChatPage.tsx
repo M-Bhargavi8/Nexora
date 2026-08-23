@@ -120,6 +120,20 @@ export default function ChatPage() {
 
         <MessageList messages={chat.messages} />
 
+        {chat.canRegenerate && (
+          <div className="px-4">
+            <div className="mx-auto flex max-w-3xl justify-center">
+              <button
+                type="button"
+                onClick={() => void chat.regenerate()}
+                className="rounded-lg border border-ink-600 bg-ink-800 px-3 py-1.5 text-xs font-medium text-mist-300 transition-colors hover:border-brand-500/50 hover:text-brand-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-500"
+              >
+                Regenerate reply
+              </button>
+            </div>
+          </div>
+        )}
+
         {chat.error && (
           <div className="px-4">
             <p
