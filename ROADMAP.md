@@ -133,8 +133,69 @@ duplicated. Test account deleted afterwards.
   build on — not needed in this phase.
 - Editing an earlier message is not implemented (Phase 4).
 
-## Phase 4 — Conversation Management ⚪
+## Phase 4 — Conversation Management ✅
 Rename, delete, search, history pagination, message editing.
+
+**Delivered and verified (2026-08-23):**
+- `PATCH /chat/conversations/{id}` renames; titles are whitespace-collapsed and
+  a blank one is rejected, so a title can never render as an invisible row
+- Renaming deliberately does **not** bump `updated_at`. The sidebar is ordered
+  by when a conversation was last *used*, and retitling an old thread should
+  not send it to the top. This meant dropping `onupdate=utcnow` from the
+  column — a Python-side default, so no migration was required
+- `DELETE /chat/conversations/{id}` → 204, cascading to every message. A real
+  delete, not a soft one
+- `GET /chat/conversations?q=&limit=&offset=` searches **titles and message
+  text** — title-only search would miss the thing you remember saying, since
+  titles are generated from the first message
+- `LIKE` metacharacters in the search term are escaped, so searching for `100%`
+  or `get_user` matches those strings instead of everything
+- Pagination returns `has_more` by fetching one row beyond the page, avoiding a
+  `COUNT(*)` on every keystroke. `limit` is capped at 100 by the route
+- `POST /chat/edit` rewrites one of your own questions, discards every turn
+  after it, and streams a new reply. Editing the first message re-derives the
+  conversation title
+- **Only user turns are editable.** Rewriting an assistant reply would let a
+  caller put words in the model's mouth, and those words return as context on
+  every later turn — self-inflicted prompt injection with a store behind it
+- Sending, regenerating and editing share one rate-limit counter, so a caller
+  cannot spend triple the budget by rotating between endpoints
+- Search is debounced (250ms) and guards against out-of-order responses, so a
+  slow reply for an abandoned term cannot overwrite current results
+- **286 backend tests, 128 frontend tests**, all passing
+
+**Verified against the running stack, not just tests:** signed in through the
+UI and exercised each feature against real PostgreSQL —
+
+- searched `pgvector` and matched a conversation titled *Postgres tuning notes*,
+  proving the match came from **message text**, not the title
+- searched a literal `%` and got **no results**; unescaped it would have matched
+  all three conversations — the wildcard-escaping proven, not asserted
+- renamed with `   Embeddings     research   ` → stored as `Embeddings research`,
+  and the row **stayed in third place** with `updated_at` unchanged
+- edited the first question of a 4-message thread: the database went to exactly
+  two rows at contiguous positions and the title was re-derived
+- confirmed exactly one Edit control per user turn and none on replies
+- deleted a conversation: one click asked for confirmation, the second removed
+  it, the open transcript cleared, and **zero orphaned message rows** remained
+- paged with `limit=1`: page one reported `has_more: true`, page two returned
+  the next row with `has_more: false`; `limit=101` and `offset=-1` both 422
+
+Test account deleted afterwards. `alembic check` on a throwaway database
+reported "No new upgrade operations detected", confirming no migration is due.
+
+**Known limitations, stated deliberately:**
+- Search is `ILIKE '%term%'`, which cannot use an index — a sequential scan,
+  fine at one user's scale and not beyond it. Ranked full-text search
+  (`tsvector` + GIN) is the upgrade; meaning-based search arrives in Phase 6.
+- Messages within a conversation are not paginated; a very long thread still
+  loads whole. Paginating the UI while `load_history` sends the entire thread
+  to the model would be inconsistent — the real fix is history trimming in
+  Phase 9.
+- Editing replaces rather than branches, so alternative versions of a question
+  cannot be compared. Same position `regenerate` took.
+- Still only the offline `echo` provider. Nothing here proves a real model
+  provider works.
 
 ## Phase 5 — File Upload ⚪
 TXT, PDF, DOCX first; then CSV, XLSX, images. Validation, storage, size
