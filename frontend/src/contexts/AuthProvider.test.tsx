@@ -56,6 +56,10 @@ function renderHarness() {
 }
 
 beforeEach(() => {
+  // Explicit: `restoreMocks` only restores vi.spyOn spies, so the vi.fn()s
+  // created inside a vi.mock factory keep their call history between tests.
+  // Without this, a call-count assertion silently measures earlier tests too.
+  vi.clearAllMocks()
   vi.mocked(api.getCurrentUser).mockResolvedValue(null)
   vi.mocked(api.logout).mockResolvedValue(undefined)
 })

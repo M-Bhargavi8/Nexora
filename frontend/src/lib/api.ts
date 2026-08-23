@@ -215,4 +215,4 @@ export async function getCurrentUser(): Promise<User | null> {
   return status === 401 ? null : data
 }
 
-export { API_BASE_URL }
+export { API_BASE_URL, API_PREFIX }

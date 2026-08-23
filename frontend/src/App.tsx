@@ -7,13 +7,15 @@
  * instead of trusting that nobody forgot a check inside a component.
  *
  *   /login, /signup   public, but bounce an already signed-in user home
- *   /                 protected: requires a valid session
+ *   /                 protected: the chat workspace
+ *   /status           protected: the Phase 1 system status page
  *   anything else     redirect home, which then applies the rule above
  */
 
 import { Navigate, Route, Routes } from 'react-router'
 import { RedirectIfAuthenticated } from './components/RedirectIfAuthenticated'
 import { RequireAuth } from './components/RequireAuth'
+import ChatPage from './pages/ChatPage'
 import LoginPage from './pages/LoginPage'
 import SignupPage from './pages/SignupPage'
 import StatusPage from './pages/StatusPage'
@@ -39,6 +41,14 @@ export default function App() {
       />
       <Route
         path="/"
+        element={
+          <RequireAuth>
+            <ChatPage />
+          </RequireAuth>
+        }
+      />
+      <Route
+        path="/status"
         element={
           <RequireAuth>
             <StatusPage />

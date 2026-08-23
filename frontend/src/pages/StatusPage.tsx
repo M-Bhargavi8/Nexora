@@ -10,6 +10,7 @@
  */
 
 import { useState } from 'react'
+import { Link } from 'react-router'
 import { StatusRow } from '../components/StatusRow'
 import { type PillTone } from '../components/StatusPill'
 import { useSystemStatus } from '../hooks/useSystemStatus'
@@ -63,6 +64,12 @@ export default function StatusPage() {
           </div>
 
           <div className="flex items-center gap-3">
+            <Link
+              to="/"
+              className="text-xs text-mist-500 underline-offset-4 hover:text-mist-300 hover:underline"
+            >
+              Back to chat
+            </Link>
             <span
               className="max-w-[200px] truncate text-xs text-mist-500"
               title={user?.email}
@@ -170,7 +177,7 @@ export default function StatusPage() {
         </main>
 
         <footer className="mt-auto pt-12 text-xs text-mist-500">
-          Phase 2 — Authentication. The workspace interface arrives in Phase 3.
+          Phase 3 — Basic AI Chat.
         </footer>
       </div>
     </div>
