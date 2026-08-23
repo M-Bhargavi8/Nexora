@@ -14,6 +14,7 @@ import { useChat } from './useChat'
 vi.mock('../lib/chat', () => ({
   streamChat: vi.fn(),
   regenerate: vi.fn(),
+  editMessage: vi.fn(),
   listConversations: vi.fn(),
   getConversation: vi.fn(),
 }))
@@ -42,8 +43,16 @@ const DONE: ChatEvent = {
 beforeEach(() => {
   vi.mocked(chatApi.streamChat).mockReset()
   vi.mocked(chatApi.regenerate).mockReset()
+  vi.mocked(chatApi.editMessage).mockReset()
   vi.mocked(chatApi.getConversation).mockReset()
 })
+
+/** Drive `editMessage` by replaying a fixed script of events. */
+function editWith(events: ChatEvent[]) {
+  vi.mocked(chatApi.editMessage).mockImplementation(async ({ onEvent }) => {
+    for (const event of events) onEvent(event)
+  })
+}
 
 /** Drive `regenerate` by replaying a fixed script of events. */
 function regenerateWith(events: ChatEvent[]) {
@@ -424,5 +433,163 @@ describe('canRegenerate', () => {
     })
 
     expect(result.current.canRegenerate).toBe(false)
+  })
+})
+
+describe('message identity', () => {
+  it('adopts the server id for the user turn once it is saved', async () => {
+    respondWith([START, { type: 'delta', text: 'answer' }, DONE])
+    const { result } = renderHook(() => useChat())
+
+    await act(async () => {
+      await result.current.send('a question')
+    })
+
+    // Until this happens the message carries a local placeholder id, and
+    // editing it would name a row the server has never heard of.
+    expect(result.current.messages[0].id).toBe('u1')
+    expect(result.current.messages[0].persisted).toBe(true)
+  })
+
+  it('marks messages from a loaded conversation as persisted', async () => {
+    vi.mocked(chatApi.getConversation).mockResolvedValue({
+      id: 'c1',
+      title: 'A thread',
+      created_at: '',
+      updated_at: '',
+      messages: [
+        {
+          id: 'm1',
+          role: 'user',
+          content: 'a question',
+          position: 0,
+          created_at: '',
+          model: null,
+          input_tokens: null,
+          output_tokens: null,
+        },
+      ],
+    })
+    const { result } = renderHook(() => useChat())
+
+    await act(async () => {
+      await result.current.load('c1')
+    })
+
+    expect(result.current.messages[0].persisted).toBe(true)
+  })
+})
+
+describe('editing a question', () => {
+  async function sendOnce(result: { current: ReturnType<typeof useChat> }) {
+    respondWith([START, { type: 'delta', text: 'first answer' }, DONE])
+    await act(async () => {
+      await result.current.send('a question')
+    })
+  }
+
+  it('rewrites the question and replaces the answer', async () => {
+    const { result } = renderHook(() => useChat())
+    await sendOnce(result)
+    editWith([START, { type: 'delta', text: 'a better answer' }, DONE])
+
+    await act(async () => {
+      await result.current.edit('u1', 'a reworded question')
+    })
+
+    expect(result.current.messages.map((m) => [m.role, m.content])).toEqual([
+      ['user', 'a reworded question'],
+      ['assistant', 'a better answer'],
+    ])
+  })
+
+  it('discards every turn after the edited one', async () => {
+    const { result } = renderHook(() => useChat())
+    await sendOnce(result)
+    respondWith([START, { type: 'delta', text: 'second answer' }, DONE])
+    await act(async () => {
+      await result.current.send('second question')
+    })
+    editWith([START, { type: 'delta', text: 'a better answer' }, DONE])
+
+    await act(async () => {
+      await result.current.edit('u1', 'a reworded question')
+    })
+
+    // The later turns were answering a question that is no longer there.
+    expect(result.current.messages.map((m) => m.content)).toEqual([
+      'a reworded question',
+      'a better answer',
+    ])
+  })
+
+  it('sends the conversation id, message id and new text', async () => {
+    const { result } = renderHook(() => useChat())
+    await sendOnce(result)
+    editWith([START, DONE])
+
+    await act(async () => {
+      await result.current.edit('u1', 'a reworded question')
+    })
+
+    expect(vi.mocked(chatApi.editMessage).mock.calls[0][0]).toMatchObject({
+      conversationId: 'c1',
+      messageId: 'u1',
+      content: 'a reworded question',
+    })
+  })
+
+  it('does nothing when there is no conversation yet', async () => {
+    const { result } = renderHook(() => useChat())
+
+    await act(async () => {
+      await result.current.edit('u1', 'anything')
+    })
+
+    expect(chatApi.editMessage).not.toHaveBeenCalled()
+  })
+
+  it('does nothing when the text is blank', async () => {
+    const { result } = renderHook(() => useChat())
+    await sendOnce(result)
+
+    await act(async () => {
+      await result.current.edit('u1', '   ')
+    })
+
+    expect(chatApi.editMessage).not.toHaveBeenCalled()
+  })
+
+  it('leaves the transcript alone when the message is not on screen', async () => {
+    const { result } = renderHook(() => useChat())
+    await sendOnce(result)
+    editWith([START, DONE])
+
+    await act(async () => {
+      await result.current.edit('does-not-exist', 'anything')
+    })
+
+    expect(result.current.messages.map((m) => m.content)).toEqual([
+      'a question',
+      'first answer',
+    ])
+  })
+
+  it('surfaces a failure and keeps the partial text', async () => {
+    const { result } = renderHook(() => useChat())
+    await sendOnce(result)
+    editWith([
+      START,
+      { type: 'delta', text: 'half' },
+      { type: 'error', code: 'provider_unavailable', message: 'Unavailable.' },
+    ])
+
+    await act(async () => {
+      await result.current.edit('u1', 'a reworded question')
+    })
+
+    expect(result.current.error).toBe('Unavailable.')
+    expect(result.current.messages.at(-1)?.content).toBe('half')
+    expect(result.current.messages.at(-1)?.failed).toBe(true)
   })
 })

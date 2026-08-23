@@ -126,13 +126,19 @@ async function request<T>(
     })
 
     let data: T
-    try {
-      data = (await response.json()) as T
-    } catch {
-      throw new ApiError(
-        `Server returned a non-JSON response (HTTP ${response.status})`,
-        response.status,
-      )
+    if (response.status === 204) {
+      // "No Content" means exactly that -- there is no body to parse, and
+      // calling .json() on it throws. A successful DELETE lands here.
+      data = undefined as T
+    } else {
+      try {
+        data = (await response.json()) as T
+      } catch {
+        throw new ApiError(
+          `Server returned a non-JSON response (HTTP ${response.status})`,
+          response.status,
+        )
+      }
     }
 
     if (!response.ok && !allowStatuses.includes(response.status)) {
@@ -215,4 +221,4 @@ export async function getCurrentUser(): Promise<User | null> {
   return status === 401 ? null : data
 }
 
-export { API_BASE_URL, API_PREFIX }
+export { API_BASE_URL, API_PREFIX, request }

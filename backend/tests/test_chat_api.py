@@ -224,7 +224,7 @@ class TestPersistence:
         await stream_chat(client, "How do embeddings work?")
 
         listed = (await client.get(f"{API}/chat/conversations")).json()
-        assert listed[0]["title"] == "How do embeddings work?"
+        assert listed["items"][0]["title"] == "How do embeddings work?"
 
 
 
@@ -372,7 +372,7 @@ class TestUserIsolation:
 
         listed = (await client.get(f"{API}/chat/conversations")).json()
 
-        assert listed == []
+        assert listed["items"] == []
 
 
 class TestReadingHistory:

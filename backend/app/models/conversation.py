@@ -47,18 +47,23 @@ class Conversation(Base):
     )
 
     # Nullable on purpose: NULL means "not titled yet", which is honestly
-    # different from a title that happens to be empty. Phase 4 adds renaming.
+    # different from a title that happens to be empty.
     title: Mapped[str | None] = mapped_column(String(TITLE_MAX_LENGTH), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, nullable=False
     )
     # Sorting the sidebar by recency means "most recently *messaged*", not
-    # "most recently edited". Adding a message does not touch this row, so
-    # `onupdate` alone would never fire -- the service bumps it explicitly
-    # when a message is appended.
+    # "most recently edited", so this is bumped explicitly by `append_message`
+    # and by nothing else.
+    #
+    # There is deliberately no `onupdate=utcnow` here. It would fire on *any*
+    # write to the row -- including a rename -- and send a conversation you
+    # merely retitled straight to the top of the sidebar as though you had just
+    # used it. Renaming is not activity. Note that `onupdate` is a Python-side
+    # default rather than DDL, so removing it needs no migration.
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False
+        DateTime(timezone=True), default=utcnow, nullable=False
     )
 
     user: Mapped[User] = relationship(back_populates="conversations")

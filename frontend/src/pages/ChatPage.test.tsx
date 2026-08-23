@@ -13,7 +13,7 @@ import { MemoryRouter } from 'react-router'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import * as api from '../lib/api'
 import * as chatApi from '../lib/chat'
-import type { ChatEvent } from '../lib/chat'
+import type { ChatEvent, ConversationDto } from '../lib/chat'
 import { AuthProvider } from '../contexts/AuthProvider'
 import ChatPage from './ChatPage'
 
@@ -31,8 +31,11 @@ vi.mock('../lib/api', async (importOriginal) => {
 vi.mock('../lib/chat', () => ({
   streamChat: vi.fn(),
   regenerate: vi.fn(),
+  editMessage: vi.fn(),
   listConversations: vi.fn(),
   getConversation: vi.fn(),
+  renameConversation: vi.fn(),
+  deleteConversation: vi.fn(),
 }))
 
 const ADA = {
@@ -40,6 +43,18 @@ const ADA = {
   email: 'ada@example.com',
   is_active: true,
   created_at: '2026-01-01T00:00:00Z',
+}
+
+/** Build a conversation-list page around the given items. */
+function page(
+  items: ConversationDto[],
+  hasMore = false,
+): chatApi.ConversationPageDto {
+  return { items, limit: 30, offset: 0, has_more: hasMore }
+}
+
+function conversation(id: string, title: string | null): ConversationDto {
+  return { id, title, created_at: '', updated_at: '' }
 }
 
 function renderChatPage() {
@@ -59,7 +74,7 @@ beforeEach(() => {
   // previous test in the file instead of this one.
   vi.clearAllMocks()
   vi.mocked(api.getCurrentUser).mockResolvedValue(ADA)
-  vi.mocked(chatApi.listConversations).mockResolvedValue([])
+  vi.mocked(chatApi.listConversations).mockResolvedValue(page([]))
   vi.mocked(chatApi.streamChat).mockImplementation(async ({ onEvent }) => {
     onEvent({
       type: 'start',
@@ -95,9 +110,9 @@ describe('rendering', () => {
   })
 
   it('lists previous conversations', async () => {
-    vi.mocked(chatApi.listConversations).mockResolvedValue([
-      { id: 'c1', title: 'How do embeddings work?', created_at: '', updated_at: '' },
-    ])
+    vi.mocked(chatApi.listConversations).mockResolvedValue(
+      page([conversation('c1', 'How do embeddings work?')]),
+    )
 
     renderChatPage()
 
@@ -107,9 +122,9 @@ describe('rendering', () => {
   })
 
   it('labels an untitled conversation rather than showing nothing', async () => {
-    vi.mocked(chatApi.listConversations).mockResolvedValue([
-      { id: 'c1', title: null, created_at: '', updated_at: '' },
-    ])
+    vi.mocked(chatApi.listConversations).mockResolvedValue(
+      page([conversation('c1', null)]),
+    )
 
     renderChatPage()
 
@@ -305,5 +320,356 @@ describe('stopping', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Stop' }))
 
     expect(screen.getByText('half an answer')).toBeInTheDocument()
+  })
+})
+
+describe('renaming a conversation', () => {
+  beforeEach(() => {
+    vi.mocked(chatApi.listConversations).mockResolvedValue(
+      page([conversation('c1', 'Old title')]),
+    )
+  })
+
+  it('saves the new title on Enter', async () => {
+    vi.mocked(chatApi.renameConversation).mockResolvedValue(
+      conversation('c1', 'New title'),
+    )
+    renderChatPage()
+    await userEvent.click(await screen.findByRole('button', { name: /^Rename/ }))
+
+    const input = screen.getByLabelText('Conversation title')
+    await userEvent.clear(input)
+    await userEvent.type(input, 'New title{Enter}')
+
+    await waitFor(() =>
+      expect(chatApi.renameConversation).toHaveBeenCalledWith('c1', 'New title'),
+    )
+    expect(
+      await screen.findByRole('button', { name: 'New title' }),
+    ).toBeInTheDocument()
+  })
+
+  it('abandons the edit on Escape', async () => {
+    renderChatPage()
+    await userEvent.click(await screen.findByRole('button', { name: /^Rename/ }))
+
+    const input = screen.getByLabelText('Conversation title')
+    await userEvent.clear(input)
+    await userEvent.type(input, 'Discarded{Escape}')
+
+    // Escape is the only way out of a rename you did not mean to start.
+    expect(chatApi.renameConversation).not.toHaveBeenCalled()
+    expect(
+      await screen.findByRole('button', { name: 'Old title' }),
+    ).toBeInTheDocument()
+  })
+
+  it('does not send an unchanged title', async () => {
+    renderChatPage()
+    await userEvent.click(await screen.findByRole('button', { name: /^Rename/ }))
+
+    await userEvent.type(screen.getByLabelText('Conversation title'), '{Enter}')
+
+    expect(chatApi.renameConversation).not.toHaveBeenCalled()
+  })
+
+  it('does not send a blank title', async () => {
+    renderChatPage()
+    await userEvent.click(await screen.findByRole('button', { name: /^Rename/ }))
+
+    const input = screen.getByLabelText('Conversation title')
+    await userEvent.clear(input)
+    await userEvent.type(input, '   {Enter}')
+
+    expect(chatApi.renameConversation).not.toHaveBeenCalled()
+  })
+})
+
+describe('deleting a conversation', () => {
+  beforeEach(() => {
+    vi.mocked(chatApi.listConversations).mockResolvedValue(
+      page([conversation('c1', 'Doomed thread')]),
+    )
+    vi.mocked(chatApi.deleteConversation).mockResolvedValue(undefined)
+  })
+
+  it('asks for confirmation before deleting', async () => {
+    renderChatPage()
+
+    await userEvent.click(await screen.findByRole('button', { name: /^Delete/ }))
+
+    // Deleting is irreversible, so one stray click must not do it.
+    expect(chatApi.deleteConversation).not.toHaveBeenCalled()
+    expect(screen.getByRole('button', { name: 'Confirm' })).toBeInTheDocument()
+  })
+
+  it('deletes once confirmed and drops the row', async () => {
+    renderChatPage()
+    await userEvent.click(await screen.findByRole('button', { name: /^Delete/ }))
+
+    await userEvent.click(screen.getByRole('button', { name: 'Confirm' }))
+
+    await waitFor(() =>
+      expect(chatApi.deleteConversation).toHaveBeenCalledWith('c1'),
+    )
+    await waitFor(() =>
+      expect(
+        screen.queryByRole('button', { name: 'Doomed thread' }),
+      ).not.toBeInTheDocument(),
+    )
+  })
+
+  it('can be cancelled', async () => {
+    renderChatPage()
+    await userEvent.click(await screen.findByRole('button', { name: /^Delete/ }))
+
+    await userEvent.click(screen.getByRole('button', { name: 'Cancel deleting' }))
+
+    expect(chatApi.deleteConversation).not.toHaveBeenCalled()
+    expect(
+      screen.getByRole('button', { name: 'Doomed thread' }),
+    ).toBeInTheDocument()
+  })
+
+  it('clears the transcript when the open conversation is deleted', async () => {
+    vi.mocked(chatApi.getConversation).mockResolvedValue({
+      id: 'c1',
+      title: 'Doomed thread',
+      created_at: '',
+      updated_at: '',
+      messages: [
+        {
+          id: 'm1',
+          role: 'user',
+          content: 'a question in the open thread',
+          position: 0,
+          created_at: '',
+          model: null,
+          input_tokens: null,
+          output_tokens: null,
+        },
+      ],
+    })
+    renderChatPage()
+    await userEvent.click(
+      await screen.findByRole('button', { name: 'Doomed thread' }),
+    )
+    await screen.findByText('a question in the open thread')
+
+    await userEvent.click(screen.getByRole('button', { name: /^Delete/ }))
+    await userEvent.click(screen.getByRole('button', { name: 'Confirm' }))
+
+    // Leaving the messages on screen would offer a composer that answers 404.
+    await waitFor(() =>
+      expect(
+        screen.queryByText('a question in the open thread'),
+      ).not.toBeInTheDocument(),
+    )
+  })
+})
+
+describe('searching conversations', () => {
+  it('queries the API with the typed term', async () => {
+    vi.mocked(chatApi.listConversations).mockResolvedValue(
+      page([conversation('c1', 'Postgres tuning')]),
+    )
+    renderChatPage()
+
+    await userEvent.type(
+      await screen.findByLabelText('Search conversations'),
+      'postgres',
+    )
+
+    await waitFor(() =>
+      expect(chatApi.listConversations).toHaveBeenLastCalledWith(
+        expect.objectContaining({ query: 'postgres' }),
+      ),
+    )
+  })
+
+  it('debounces so typing does not fire a request per keystroke', async () => {
+    vi.mocked(chatApi.listConversations).mockResolvedValue(page([]))
+    renderChatPage()
+    await screen.findByLabelText('Search conversations')
+    vi.mocked(chatApi.listConversations).mockClear()
+
+    await userEvent.type(
+      screen.getByLabelText('Search conversations'),
+      'pgvector',
+    )
+
+    // Eight characters must not mean eight requests, seven of them already
+    // stale by the time they land.
+    await waitFor(() =>
+      expect(chatApi.listConversations).toHaveBeenCalledWith(
+        expect.objectContaining({ query: 'pgvector' }),
+      ),
+    )
+    expect(
+      vi.mocked(chatApi.listConversations).mock.calls.length,
+    ).toBeLessThan(8)
+  })
+
+  it('says so when nothing matches', async () => {
+    vi.mocked(chatApi.listConversations).mockResolvedValue(page([]))
+    renderChatPage()
+
+    await userEvent.type(
+      await screen.findByLabelText('Search conversations'),
+      'nothing',
+    )
+
+    expect(
+      await screen.findByText('No conversations match that search.'),
+    ).toBeInTheDocument()
+  })
+})
+
+describe('paging the conversation list', () => {
+  it('offers Load more only when another page exists', async () => {
+    vi.mocked(chatApi.listConversations).mockResolvedValue(
+      page([conversation('c1', 'Only thread')], false),
+    )
+    renderChatPage()
+    await screen.findByRole('button', { name: 'Only thread' })
+
+    expect(
+      screen.queryByRole('button', { name: 'Load more' }),
+    ).not.toBeInTheDocument()
+  })
+
+  it('appends the next page rather than replacing the list', async () => {
+    vi.mocked(chatApi.listConversations).mockResolvedValue(
+      page([conversation('c1', 'First page thread')], true),
+    )
+    renderChatPage()
+    await screen.findByRole('button', { name: 'First page thread' })
+
+    vi.mocked(chatApi.listConversations).mockResolvedValue({
+      items: [conversation('c2', 'Second page thread')],
+      limit: 30,
+      offset: 1,
+      has_more: false,
+    })
+    await userEvent.click(screen.getByRole('button', { name: 'Load more' }))
+
+    expect(
+      await screen.findByRole('button', { name: 'Second page thread' }),
+    ).toBeInTheDocument()
+    expect(
+      screen.getByRole('button', { name: 'First page thread' }),
+    ).toBeInTheDocument()
+  })
+
+  it('asks for the next page by offset', async () => {
+    vi.mocked(chatApi.listConversations).mockResolvedValue(
+      page([conversation('c1', 'First page thread')], true),
+    )
+    renderChatPage()
+    await screen.findByRole('button', { name: 'First page thread' })
+
+    await userEvent.click(screen.getByRole('button', { name: 'Load more' }))
+
+    await waitFor(() =>
+      expect(chatApi.listConversations).toHaveBeenLastCalledWith(
+        expect.objectContaining({ offset: 1 }),
+      ),
+    )
+  })
+})
+
+describe('editing a question', () => {
+  async function sendOnce() {
+    renderChatPage()
+    const composer = await screen.findByLabelText('Message')
+    await userEvent.type(composer, 'orginal question{Enter}')
+    await screen.findByText('Hello there')
+  }
+
+  it('offers no edit control on the assistant reply', async () => {
+    await sendOnce()
+
+    // Exactly one Edit button: the user's turn, not the reply. Rewriting a
+    // reply would let the user put words in the model's mouth.
+    expect(screen.getAllByRole('button', { name: 'Edit' })).toHaveLength(1)
+  })
+
+  it('sends the edit with the id the server gave the message', async () => {
+    vi.mocked(chatApi.editMessage).mockImplementation(async ({ onEvent }) => {
+      onEvent({ type: 'start', conversation_id: 'c1', user_message_id: 'u1' })
+      onEvent({ type: 'delta', text: 'A better answer' })
+      onEvent({
+        type: 'done',
+        conversation_id: 'c1',
+        message_id: 'm2',
+        model: 'echo',
+        input_tokens: null,
+        output_tokens: null,
+      })
+    })
+    await sendOnce()
+
+    await userEvent.click(screen.getByRole('button', { name: 'Edit' }))
+    const textarea = screen.getByLabelText('Edit your message')
+    await userEvent.clear(textarea)
+    await userEvent.type(textarea, 'original question{Enter}')
+
+    // 'u1' is the id from the start event, not the local placeholder -- naming
+    // a local id would reference a row the server has never heard of.
+    await waitFor(() =>
+      expect(chatApi.editMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          conversationId: 'c1',
+          messageId: 'u1',
+          content: 'original question',
+        }),
+      ),
+    )
+  })
+
+  it('replaces the old question and its answer on screen', async () => {
+    vi.mocked(chatApi.editMessage).mockImplementation(async ({ onEvent }) => {
+      onEvent({ type: 'start', conversation_id: 'c1', user_message_id: 'u1' })
+      onEvent({ type: 'delta', text: 'A better answer' })
+      onEvent({
+        type: 'done',
+        conversation_id: 'c1',
+        message_id: 'm2',
+        model: 'echo',
+        input_tokens: null,
+        output_tokens: null,
+      })
+    })
+    await sendOnce()
+
+    await userEvent.click(screen.getByRole('button', { name: 'Edit' }))
+    const textarea = screen.getByLabelText('Edit your message')
+    await userEvent.clear(textarea)
+    await userEvent.type(textarea, 'original question{Enter}')
+
+    expect(await screen.findByText('A better answer')).toBeInTheDocument()
+    // The old reply answered wording that is no longer above it.
+    expect(screen.queryByText('Hello there')).not.toBeInTheDocument()
+    expect(screen.queryByText('orginal question')).not.toBeInTheDocument()
+  })
+
+  it('can be cancelled without sending anything', async () => {
+    await sendOnce()
+
+    await userEvent.click(screen.getByRole('button', { name: 'Edit' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+
+    expect(chatApi.editMessage).not.toHaveBeenCalled()
+    expect(screen.getByText('orginal question')).toBeInTheDocument()
+  })
+
+  it('will not send an unchanged question', async () => {
+    await sendOnce()
+
+    await userEvent.click(screen.getByRole('button', { name: 'Edit' }))
+
+    // Nothing changed, so there is nothing to re-ask -- and re-asking would
+    // still cost a full model call.
+    expect(screen.getByRole('button', { name: 'Send edit' })).toBeDisabled()
   })
 })

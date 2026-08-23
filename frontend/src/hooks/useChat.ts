@@ -11,6 +11,7 @@
 import { useCallback, useRef, useState } from 'react'
 import { ApiError } from '../lib/api'
 import {
+  editMessage as editRequest,
   getConversation,
   regenerate as regenerateRequest,
   streamChat,
@@ -26,6 +27,12 @@ export interface DisplayMessage {
   pending?: boolean
   /** Set when this turn failed, so the UI can mark it rather than lose it. */
   failed?: boolean
+  /**
+   * Whether `id` is the server's id for this message rather than a local
+   * placeholder. Only a message the server knows about can be edited, so the
+   * UI uses this to decide whether to offer the option at all.
+   */
+  persisted?: boolean
 }
 
 export interface UseChat {
@@ -37,13 +44,21 @@ export interface UseChat {
   canRegenerate: boolean
   send: (content: string) => Promise<void>
   regenerate: () => Promise<void>
+  /** Rewrite one of your own questions and answer it again. */
+  edit: (messageId: string, content: string) => Promise<void>
   stop: () => void
   load: (conversationId: string) => Promise<void>
   reset: () => void
 }
 
 function toDisplay(message: ChatMessageDto): DisplayMessage {
-  return { id: message.id, role: message.role, content: message.content }
+  return {
+    id: message.id,
+    role: message.role,
+    content: message.content,
+    // Loaded from the server, so every id here is a real one.
+    persisted: true,
+  }
 }
 
 /** Ids for messages that do not have a server id yet. */
@@ -112,6 +127,12 @@ export function useChat(): UseChat {
         onEvent: (event: ChatEvent) => void,
         signal: AbortSignal,
       ) => Promise<void>,
+      /**
+       * The placeholder id of the user turn this reply answers, if one was
+       * just created locally. On `start` it is swapped for the server's id,
+       * which is what makes the message editable without a page reload.
+       */
+      userPlaceholderId?: string,
     ) => {
       const controller = new AbortController()
       abortRef.current = controller
@@ -130,6 +151,23 @@ export function useChat(): UseChat {
           case 'start':
             conversationIdRef.current = event.conversation_id
             setConversationId(event.conversation_id)
+            if (userPlaceholderId) {
+              // Adopt the server's id for the turn that was just saved.
+              // Without this the message keeps a local id until the page is
+              // reloaded, and editing it would name a row the server has
+              // never heard of.
+              setMessages((current) =>
+                current.map((message) =>
+                  message.id === userPlaceholderId
+                    ? {
+                        ...message,
+                        id: event.user_message_id,
+                        persisted: true,
+                      }
+                    : message,
+                ),
+              )
+            }
             break
           case 'delta':
             // Append rather than replace: each event carries one fragment, and
@@ -183,19 +221,23 @@ export function useChat(): UseChat {
       if (!trimmed) return
 
       const assistantId = localId('assistant')
+      const userId = localId('user')
       setMessages((current) => [
         ...current,
-        { id: localId('user'), role: 'user', content: trimmed },
+        { id: userId, role: 'user', content: trimmed },
         { id: assistantId, role: 'assistant', content: '', pending: true },
       ])
 
-      await consume(assistantId, (onEvent, signal) =>
-        streamChat({
-          content: trimmed,
-          conversationId: conversationIdRef.current,
-          onEvent,
-          signal,
-        }),
+      await consume(
+        assistantId,
+        (onEvent, signal) =>
+          streamChat({
+            content: trimmed,
+            conversationId: conversationIdRef.current,
+            onEvent,
+            signal,
+          }),
+        userId,
       )
     },
     [consume],
@@ -222,6 +264,40 @@ export function useChat(): UseChat {
     )
   }, [consume])
 
+  const edit = useCallback(
+    async (messageId: string, content: string) => {
+      const id = conversationIdRef.current
+      const trimmed = content.trim()
+      if (!id || !trimmed) return
+
+      const assistantId = localId('assistant')
+      setMessages((current) => {
+        const index = current.findIndex((message) => message.id === messageId)
+        if (index === -1) return current
+
+        // Rewind to the edited turn, mirroring the server. Everything below it
+        // was answering the old wording, so leaving any of it on screen would
+        // show replies to a question that is no longer above them.
+        return [
+          ...current.slice(0, index),
+          { ...current[index], content: trimmed },
+          { id: assistantId, role: 'assistant', content: '', pending: true },
+        ]
+      })
+
+      await consume(assistantId, (onEvent, signal) =>
+        editRequest({
+          conversationId: id,
+          messageId,
+          content: trimmed,
+          onEvent,
+          signal,
+        }),
+      )
+    },
+    [consume],
+  )
+
   const lastMessage = messages.at(-1)
   const canRegenerate =
     !isStreaming &&
@@ -237,6 +313,7 @@ export function useChat(): UseChat {
     canRegenerate,
     send,
     regenerate,
+    edit,
     stop,
     load,
     reset,

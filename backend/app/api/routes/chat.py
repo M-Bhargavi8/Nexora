@@ -21,7 +21,7 @@ import uuid
 from collections.abc import AsyncIterator
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from fastapi.responses import StreamingResponse
 
 from app.ai.base import (
@@ -44,19 +44,26 @@ from app.models.message import MessageRole
 from app.schemas.chat import (
     ChatRequest,
     ConversationDetailResponse,
+    ConversationPage,
     ConversationResponse,
+    EditMessageRequest,
     MessageResponse,
     RegenerateRequest,
+    RenameConversationRequest,
 )
 from app.services.chat import (
     append_message,
     create_conversation,
+    delete_conversation,
     derive_title,
     drop_trailing_assistant_message,
     get_conversation,
+    get_message,
     last_message,
     list_conversations,
     load_history,
+    rename_conversation,
+    replace_user_message,
 )
 
 logger = get_logger(__name__)
@@ -86,6 +93,33 @@ _CONVERSATION_NOT_FOUND = HTTPException(
     status_code=status.HTTP_404_NOT_FOUND,
     detail="Conversation not found",
 )
+
+# The sidebar asks for one page at a time. The ceiling is what stops a client
+# from turning "list my conversations" into "serialize everything I own".
+DEFAULT_PAGE_SIZE = 30
+MAX_PAGE_SIZE = 100
+# A search term longer than a title cannot usefully match one, and an
+# unbounded term is an unbounded LIKE pattern to scan every row against.
+MAX_SEARCH_LENGTH = 200
+
+
+def _enforce_chat_rate_limit(user_id: uuid.UUID) -> None:
+    """Charge one unit against the user's chat quota, or raise 429.
+
+    Shared by every endpoint that calls a model. They all cost the same, so
+    they draw on the same counter -- separate counters would let a caller spend
+    three times the intended budget by rotating between sending, regenerating
+    and editing.
+    """
+    if chat_rate_limiter.allow(f"chat:{user_id}"):
+        return
+
+    logger.warning("Chat rate limit exceeded", extra={"user_id": str(user_id)})
+    raise HTTPException(
+        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+        detail="Too many messages. Please wait a moment and try again.",
+        headers={"Retry-After": str(chat_rate_limiter.window_seconds)},
+    )
 
 
 def _sse(payload: dict[str, Any]) -> str:
@@ -237,13 +271,7 @@ async def send_message(
 ) -> StreamingResponse:
     """Append the user's message and stream the assistant's reply."""
     # Keyed by user: the cost belongs to an account, not an address.
-    if not chat_rate_limiter.allow(f"chat:{user.id}"):
-        logger.warning("Chat rate limit exceeded", extra={"user_id": str(user.id)})
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="Too many messages. Please wait a moment and try again.",
-            headers={"Retry-After": str(chat_rate_limiter.window_seconds)},
-        )
+    _enforce_chat_rate_limit(user.id)
 
     if payload.conversation_id is None:
         conversation = await create_conversation(
@@ -309,13 +337,7 @@ async def regenerate(
     same as sending: a full request to the model. Regenerating is also the
     easiest thing in the product to sit and hammer.
     """
-    if not chat_rate_limiter.allow(f"chat:{user.id}"):
-        logger.warning("Chat rate limit exceeded", extra={"user_id": str(user.id)})
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="Too many messages. Please wait a moment and try again.",
-            headers={"Retry-After": str(chat_rate_limiter.window_seconds)},
-        )
+    _enforce_chat_rate_limit(user.id)
 
     conversation = await get_conversation(
         db, conversation_id=payload.conversation_id, user_id=user.id
@@ -353,14 +375,153 @@ async def regenerate(
     )
 
 
+@router.post(
+    "/edit",
+    summary="Rewrite a question and answer it again",
+    description=(
+        "Replaces the text of one of your own messages, discards every turn "
+        "after it, and streams a new reply. Returns a `text/event-stream`."
+    ),
+    responses={
+        404: {"description": "No such conversation or message for this user"},
+        409: {"description": "That message is not an editable question"},
+        429: {"description": "Too many requests"},
+    },
+)
+async def edit_message(
+    payload: EditMessageRequest,
+    request: Request,
+    db: DbSession,
+    user: CurrentUser,
+    session_factory: SessionFactory,
+) -> StreamingResponse:
+    """Edit a question, rewind the thread to it, and answer again."""
+    _enforce_chat_rate_limit(user.id)
+
+    conversation = await get_conversation(
+        db, conversation_id=payload.conversation_id, user_id=user.id
+    )
+    if conversation is None:
+        raise _CONVERSATION_NOT_FOUND
+
+    message = await get_message(
+        db, conversation_id=conversation.id, message_id=payload.message_id
+    )
+    if message is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Message not found"
+        )
+
+    # SECURITY: only the user's own turns are editable. Allowing an assistant
+    # message to be rewritten would let a caller put words in the model's
+    # mouth -- and those words come back as context on every later turn, so a
+    # forged reply becomes something the model treats as its own prior
+    # statement. That is self-inflicted prompt injection with a persistent
+    # store behind it.
+    if message.role is not MessageRole.USER:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Only your own messages can be edited.",
+        )
+
+    await replace_user_message(
+        db, conversation=conversation, message=message, content=payload.content
+    )
+
+    history = await load_history(db, conversation_id=conversation.id)
+
+    return StreamingResponse(
+        _stream_reply(session_factory, conversation.id, message.id, history),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
+
+
 @router.get(
     "/conversations",
-    response_model=list[ConversationResponse],
-    summary="List this user's conversations",
+    response_model=ConversationPage,
+    summary="List or search this user's conversations",
 )
-async def get_conversations(db: DbSession, user: CurrentUser) -> list[ConversationResponse]:
-    conversations = await list_conversations(db, user_id=user.id)
-    return [ConversationResponse.model_validate(c) for c in conversations]
+async def get_conversations(
+    db: DbSession,
+    user: CurrentUser,
+    q: Annotated[
+        str | None,
+        Query(
+            max_length=MAX_SEARCH_LENGTH,
+            description="Match conversations by title or message text.",
+        ),
+    ] = None,
+    limit: Annotated[int, Query(ge=1, le=MAX_PAGE_SIZE)] = DEFAULT_PAGE_SIZE,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> ConversationPage:
+    """One page of conversations, newest activity first.
+
+    `limit` is capped by the route rather than trusted from the client, so a
+    request for a million rows is rejected at the boundary instead of becoming
+    a million-row query.
+    """
+    # A search of only spaces is not a search. Treating it as one would run a
+    # `%  %` scan and return nothing, which looks like a bug to the user.
+    term = q.strip() if q else None
+
+    conversations, has_more = await list_conversations(
+        db, user_id=user.id, query=term or None, limit=limit, offset=offset
+    )
+    return ConversationPage(
+        items=[ConversationResponse.model_validate(c) for c in conversations],
+        limit=limit,
+        offset=offset,
+        has_more=has_more,
+    )
+
+
+@router.patch(
+    "/conversations/{conversation_id}",
+    response_model=ConversationResponse,
+    summary="Rename a conversation",
+    responses={404: {"description": "No such conversation for this user"}},
+)
+async def patch_conversation(
+    conversation_id: uuid.UUID,
+    payload: RenameConversationRequest,
+    db: DbSession,
+    user: CurrentUser,
+) -> ConversationResponse:
+    conversation = await get_conversation(
+        db, conversation_id=conversation_id, user_id=user.id
+    )
+    if conversation is None:
+        raise _CONVERSATION_NOT_FOUND
+
+    renamed = await rename_conversation(db, conversation=conversation, title=payload.title)
+    return ConversationResponse.model_validate(renamed)
+
+
+@router.delete(
+    "/conversations/{conversation_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Delete a conversation and all of its messages",
+    responses={404: {"description": "No such conversation for this user"}},
+)
+async def remove_conversation(
+    conversation_id: uuid.UUID, db: DbSession, user: CurrentUser
+) -> Response:
+    conversation = await get_conversation(
+        db, conversation_id=conversation_id, user_id=user.id
+    )
+    # 404 rather than a silent success. "Delete something that is not yours"
+    # and "delete something that does not exist" must stay indistinguishable,
+    # or the response becomes a way to test which ids are real.
+    if conversation is None:
+        raise _CONVERSATION_NOT_FOUND
+
+    await delete_conversation(db, conversation=conversation)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.get(

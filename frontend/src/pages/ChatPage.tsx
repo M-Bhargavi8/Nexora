@@ -4,40 +4,28 @@
  * Reaching this page at all means `RequireAuth` resolved a valid session.
  */
 
-import { useCallback, useEffect, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Link } from 'react-router'
 import { Composer } from '../components/Composer'
+import { ConversationSidebar } from '../components/ConversationSidebar'
 import { MessageList } from '../components/MessageList'
 import { useAuth } from '../hooks/useAuth'
 import { useChat } from '../hooks/useChat'
-import { listConversations, type ConversationDto } from '../lib/chat'
+import { useConversations } from '../hooks/useConversations'
 
 export default function ChatPage() {
   const { user, logout } = useAuth()
   const chat = useChat()
-  const [conversations, setConversations] = useState<ConversationDto[]>([])
+  const conversations = useConversations()
   const [isSigningOut, setIsSigningOut] = useState(false)
-
-  const refreshConversations = useCallback(async () => {
-    try {
-      setConversations(await listConversations())
-    } catch {
-      // The sidebar is a convenience. Failing to load it must not take the
-      // chat itself down -- you can still hold a conversation without a list
-      // of previous ones.
-    }
-  }, [])
-
-  useEffect(() => {
-    void refreshConversations()
-  }, [refreshConversations])
 
   // The list is ordered by most recent activity and titled from the first
   // message, so it only changes once a turn has completed.
   const { isStreaming } = chat
+  const { refresh } = conversations
   useEffect(() => {
-    if (!isStreaming) void refreshConversations()
-  }, [isStreaming, refreshConversations])
+    if (!isStreaming) void refresh()
+  }, [isStreaming, refresh])
 
   async function handleSignOut() {
     setIsSigningOut(true)
@@ -46,45 +34,13 @@ export default function ChatPage() {
 
   return (
     <div className="flex h-full min-h-0">
-      <aside className="hidden w-64 shrink-0 flex-col border-r border-ink-700/60 bg-ink-950/60 md:flex">
-        <div className="p-3">
-          <button
-            type="button"
-            onClick={chat.reset}
-            className="w-full rounded-lg border border-ink-600 bg-ink-800 px-3 py-2 text-sm font-medium text-mist-200 transition-colors hover:border-brand-500/50 hover:text-brand-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-500"
-          >
-            New chat
-          </button>
-        </div>
-
-        <nav aria-label="Conversations" className="min-h-0 flex-1 overflow-y-auto px-2 pb-2">
-          {conversations.length === 0 ? (
-            <p className="px-2 py-3 text-xs text-mist-500">No conversations yet.</p>
-          ) : (
-            <ul className="space-y-0.5">
-              {conversations.map((conversation) => {
-                const isActive = conversation.id === chat.conversationId
-                return (
-                  <li key={conversation.id}>
-                    <button
-                      type="button"
-                      onClick={() => void chat.load(conversation.id)}
-                      aria-current={isActive ? 'true' : undefined}
-                      className={`w-full truncate rounded-md px-2.5 py-2 text-left text-[13px] transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-500 ${
-                        isActive
-                          ? 'bg-ink-800 text-mist-100'
-                          : 'text-mist-400 hover:bg-ink-850 hover:text-mist-200'
-                      }`}
-                    >
-                      {conversation.title ?? 'New conversation'}
-                    </button>
-                  </li>
-                )
-              })}
-            </ul>
-          )}
-        </nav>
-      </aside>
+      <ConversationSidebar
+        list={conversations}
+        activeId={chat.conversationId}
+        onSelect={(id) => void chat.load(id)}
+        onNewChat={chat.reset}
+        onActiveDeleted={chat.reset}
+      />
 
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         <header className="flex items-center justify-between gap-3 border-b border-ink-700/60 px-4 py-2.5">
@@ -93,7 +49,7 @@ export default function ChatPage() {
               NEXORA
             </span>
             <span className="rounded border border-ink-700 bg-ink-850 px-1.5 py-0.5 text-[10px] font-medium text-mist-500">
-              Phase&nbsp;3
+              Phase&nbsp;4
             </span>
           </div>
 
@@ -118,7 +74,17 @@ export default function ChatPage() {
           </div>
         </header>
 
-        <MessageList messages={chat.messages} />
+        {/* No edit handler while a reply is streaming: rewinding the thread
+            underneath a reply that is still being written would leave the
+            server saving it into a conversation that no longer has that turn. */}
+        <MessageList
+          messages={chat.messages}
+          onEdit={
+            chat.isStreaming
+              ? undefined
+              : (messageId, content) => void chat.edit(messageId, content)
+          }
+        />
 
         {chat.canRegenerate && (
           <div className="px-4">

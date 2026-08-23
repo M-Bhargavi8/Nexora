@@ -9,9 +9,11 @@ const FOLLOW_THRESHOLD = 120
 
 interface MessageListProps {
   messages: DisplayMessage[]
+  /** Omitted while streaming, which disables editing for the duration. */
+  onEdit?: (messageId: string, content: string) => void
 }
 
-export function MessageList({ messages }: MessageListProps) {
+export function MessageList({ messages, onEdit }: MessageListProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   // Whether the user is still reading the latest text, as opposed to having
   // scrolled up to re-read something earlier.
@@ -68,7 +70,7 @@ export function MessageList({ messages }: MessageListProps) {
           interrupting on every token. */}
       <div className="mx-auto flex max-w-3xl flex-col gap-5" aria-live="polite">
         {messages.map((message) => (
-          <MessageBubble key={message.id} message={message} />
+          <MessageBubble key={message.id} message={message} onEdit={onEdit} />
         ))}
       </div>
     </div>

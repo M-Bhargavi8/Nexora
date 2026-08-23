@@ -12,7 +12,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Sequence
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai.base import ChatMessage
@@ -70,16 +70,112 @@ async def get_conversation(
     return result.scalar_one_or_none()
 
 
+def _like_pattern(term: str) -> str:
+    r"""Turn a search term into a safe `LIKE` pattern.
+
+    SQLAlchemy parameterizes the value, so there is no SQL injection here. But
+    parameterization does **not** neutralize `LIKE` wildcards, and that is a
+    correctness bug waiting to happen: searching for `100%` would match every
+    conversation, and `_` would match any single character. Both are ordinary
+    things to type. So the metacharacters are escaped, with the escape
+    character itself escaped first -- doing it in the other order would double
+    the backslashes it just inserted.
+    """
+    escaped = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped}%"
+
+
 async def list_conversations(
-    db: AsyncSession, *, user_id: uuid.UUID
-) -> Sequence[Conversation]:
-    """This user's conversations, most recently active first."""
+    db: AsyncSession,
+    *,
+    user_id: uuid.UUID,
+    query: str | None = None,
+    limit: int = 30,
+    offset: int = 0,
+) -> tuple[Sequence[Conversation], bool]:
+    """One page of this user's conversations, most recently active first.
+
+    Returns the page and whether another one follows.
+
+    `query` matches the title *or* any message in the thread. Title-only search
+    would be cheaper but nearly useless -- titles are generated from the first
+    message, so the thing you remember saying is usually not in one.
+
+    COST: `%term%` cannot use a B-tree index, so this is a sequential scan.
+    That is the honest trade for substring matching, and it is fine at the
+    scale of one user's conversations. Ranked full-text search (a `tsvector`
+    column plus a GIN index) is the upgrade when it stops being fine, and
+    meaning-based search arrives with embeddings in Phase 6.
+    """
+    statement = select(Conversation).where(Conversation.user_id == user_id)
+
+    if query:
+        pattern = _like_pattern(query)
+        statement = statement.where(
+            or_(
+                Conversation.title.ilike(pattern, escape="\\"),
+                # EXISTS rather than a JOIN: a thread that mentions the term in
+                # twelve messages must still appear once, and a JOIN would
+                # return it twelve times.
+                select(Message.id)
+                .where(
+                    Message.conversation_id == Conversation.id,
+                    Message.content.ilike(pattern, escape="\\"),
+                )
+                .exists(),
+            )
+        )
+
     result = await db.execute(
-        select(Conversation)
-        .where(Conversation.user_id == user_id)
-        .order_by(Conversation.updated_at.desc())
+        statement
+        # `id` breaks ties. Without it, two conversations sharing a timestamp
+        # could come back in a different order on each request, which makes
+        # pagination drop or repeat rows across pages.
+        .order_by(Conversation.updated_at.desc(), Conversation.id.desc())
+        .offset(offset)
+        # One extra row, purely to answer "is there another page?" -- see the
+        # note on ConversationPage.
+        .limit(limit + 1)
     )
-    return result.scalars().all()
+    rows = list(result.scalars().all())
+
+    has_more = len(rows) > limit
+    return rows[:limit], has_more
+
+
+async def rename_conversation(
+    db: AsyncSession, *, conversation: Conversation, title: str
+) -> Conversation:
+    """Give a conversation a new title.
+
+    Deliberately does not touch `updated_at`: the sidebar is ordered by when a
+    conversation was last *used*, and renaming an old thread should not make it
+    look like the newest one.
+    """
+    conversation.title = title
+    await db.commit()
+    await db.refresh(conversation)
+    logger.info(
+        "Conversation renamed", extra={"conversation_id": str(conversation.id)}
+    )
+    return conversation
+
+
+async def delete_conversation(
+    db: AsyncSession, *, conversation: Conversation
+) -> None:
+    """Delete a conversation and, by cascade, every message in it.
+
+    A real delete, not a soft one. A user who deletes a conversation means it
+    to be gone, and keeping a hidden copy they believe is deleted would be
+    exactly the thing they did not consent to. Retention for auditing, if it is
+    ever needed, has to be a stated policy rather than a silent default.
+    """
+    await db.delete(conversation)
+    await db.commit()
+    logger.info(
+        "Conversation deleted", extra={"conversation_id": str(conversation.id)}
+    )
 
 
 async def next_position(db: AsyncSession, *, conversation_id: uuid.UUID) -> int:
@@ -174,6 +270,72 @@ async def drop_trailing_assistant_message(
         extra={"conversation_id": str(conversation_id)},
     )
     return True
+
+
+async def get_message(
+    db: AsyncSession, *, conversation_id: uuid.UUID, message_id: uuid.UUID
+) -> Message | None:
+    """One message, but only if it belongs to the given conversation.
+
+    The `conversation_id` filter is the authorization. The caller has already
+    proved it owns *this conversation*; loading a message by id alone would
+    happily return one from somebody else's thread.
+    """
+    result = await db.execute(
+        select(Message).where(
+            Message.id == message_id,
+            Message.conversation_id == conversation_id,
+        )
+    )
+    return result.scalar_one_or_none()
+
+
+async def replace_user_message(
+    db: AsyncSession, *, conversation: Conversation, message: Message, content: str
+) -> None:
+    """Rewrite a question and discard everything that came after it.
+
+    **Why the truncation.** Once a question changes, every turn after it was
+    answering something that was never asked. Leaving them would produce a
+    transcript that is simply untrue -- a reply visibly responding to text that
+    is no longer above it -- and, worse, that false history would be sent to
+    the model as context on the next turn. So editing rewinds the conversation
+    to that point and it moves forward again from there.
+
+    The alternative is branching: keep both versions as a tree and let the user
+    switch between them. That is a real feature, and a much larger one -- it
+    needs a notion of which branch is active, which turns belong to it, and a
+    UI for moving between them. This phase takes the same position editing took
+    in `drop_trailing_assistant_message`: replace, do not branch.
+
+    Retitles the conversation when the *first* message changes, since the title
+    was derived from it and would otherwise still advertise the old question.
+    """
+    message.content = content
+
+    # Everything strictly after the edited turn, which includes the reply that
+    # answered the old wording.
+    await db.execute(
+        delete(Message).where(
+            Message.conversation_id == conversation.id,
+            Message.position > message.position,
+        )
+    )
+
+    if message.position == 0:
+        conversation.title = derive_title(content)
+
+    # One commit for the whole rewind. Committing the new text separately would
+    # leave a window in which the conversation held an edited question still
+    # followed by the answer to the old one.
+    await db.commit()
+    logger.info(
+        "Question edited; later turns discarded",
+        extra={
+            "conversation_id": str(conversation.id),
+            "from_position": message.position,
+        },
+    )
 
 
 async def last_message(

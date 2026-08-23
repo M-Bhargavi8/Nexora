@@ -10,7 +10,9 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from app.models.conversation import TITLE_MAX_LENGTH
 
 # SECURITY/COST: an unbounded prompt is an unbounded bill, and a very large one
 # is also a way to exhaust server memory before it ever reaches the provider.
@@ -48,6 +50,47 @@ class RegenerateRequest(BaseModel):
     conversation_id: uuid.UUID
 
 
+class EditMessageRequest(BaseModel):
+    """Replace one of your own questions and answer it again.
+
+    Both ids are required even though `message_id` alone would identify the
+    row. The conversation is what carries ownership, so naming it lets the
+    handler authorize against the conversation and then confirm the message
+    really belongs to it -- rather than trusting a message id to be
+    self-authorizing.
+    """
+
+    conversation_id: uuid.UUID
+    message_id: uuid.UUID
+    content: str = Field(
+        min_length=1,
+        max_length=MAX_MESSAGE_LENGTH,
+        description="The replacement text for the question.",
+    )
+
+
+class RenameConversationRequest(BaseModel):
+    """A new title for a conversation."""
+
+    title: str = Field(min_length=1, max_length=TITLE_MAX_LENGTH)
+
+    @field_validator("title")
+    @classmethod
+    def _collapse_whitespace(cls, value: str) -> str:
+        """Normalize the title, and reject one that is only whitespace.
+
+        `min_length=1` alone accepts a single space, which stores a title that
+        renders as an invisible, unclickable row in the sidebar. Collapsing
+        also stops a pasted multi-line block from becoming a title containing
+        newlines -- the same rule `derive_title` applies to generated titles,
+        so typed and generated titles cannot behave differently.
+        """
+        collapsed = " ".join(value.split())
+        if not collapsed:
+            raise ValueError("Title cannot be blank.")
+        return collapsed
+
+
 class MessageResponse(BaseModel):
     """A stored message, as returned to its owner."""
 
@@ -80,3 +123,18 @@ class ConversationDetailResponse(ConversationResponse):
     """A conversation together with its full message history."""
 
     messages: list[MessageResponse]
+
+
+class ConversationPage(BaseModel):
+    """One page of the sidebar list.
+
+    `has_more` rather than a total count, because knowing whether another page
+    exists is all a "Load more" button needs -- and it is answered by asking
+    for one row more than requested, which costs nothing. A `total` would mean
+    a second `COUNT(*)` over the whole table on every keystroke of a search.
+    """
+
+    items: list[ConversationResponse]
+    limit: int
+    offset: int
+    has_more: bool

@@ -6,7 +6,7 @@
  * string. So the stream is read manually from `fetch`.
  */
 
-import { API_BASE_URL, API_PREFIX, ApiError } from './api'
+import { API_BASE_URL, API_PREFIX, ApiError, request } from './api'
 
 export interface ChatMessageDto {
   id: string
@@ -28,6 +28,14 @@ export interface ConversationDto {
 
 export interface ConversationDetailDto extends ConversationDto {
   messages: ChatMessageDto[]
+}
+
+/** One page of the sidebar list. Mirrors `ConversationPage` on the backend. */
+export interface ConversationPageDto {
+  items: ConversationDto[]
+  limit: number
+  offset: number
+  has_more: boolean
 }
 
 /** The events the server sends inside the stream. Mirrors app/api/routes/chat.py. */
@@ -56,6 +64,21 @@ interface RegenerateOptions {
   conversationId: string
   onEvent: (event: ChatEvent) => void
   signal?: AbortSignal
+}
+
+interface EditOptions {
+  conversationId: string
+  messageId: string
+  content: string
+  onEvent: (event: ChatEvent) => void
+  signal?: AbortSignal
+}
+
+interface ListOptions {
+  /** Free-text search over titles and message content. */
+  query?: string
+  limit?: number
+  offset?: number
 }
 
 /** Read an SSE body, invoking `onEvent` for each complete event. */
@@ -180,20 +203,63 @@ export function regenerate({
   )
 }
 
-async function getJson<T>(path: string): Promise<T> {
-  const response = await fetch(`${API_BASE_URL}${API_PREFIX}${path}`, {
-    credentials: 'include',
+/**
+ * Rewrite one of your own questions and stream a new answer.
+ *
+ * Every turn after the edited one is discarded, on the server and on screen:
+ * they were answering a question that is no longer there.
+ */
+export function editMessage({
+  conversationId,
+  messageId,
+  content,
+  onEvent,
+  signal,
+}: EditOptions): Promise<void> {
+  return postStream(
+    '/chat/edit',
+    { conversation_id: conversationId, message_id: messageId, content },
+    onEvent,
+    signal,
+  )
+}
+
+/** One page of conversations, optionally filtered by a search term. */
+export async function listConversations({
+  query,
+  limit,
+  offset,
+}: ListOptions = {}): Promise<ConversationPageDto> {
+  // URLSearchParams handles the encoding, so a term containing `&`, `#` or a
+  // space cannot break out of the parameter it belongs to.
+  const params = new URLSearchParams()
+  if (query) params.set('q', query)
+  if (limit !== undefined) params.set('limit', String(limit))
+  if (offset !== undefined) params.set('offset', String(offset))
+
+  const suffix = params.size > 0 ? `?${params}` : ''
+  const { data } = await request<ConversationPageDto>(
+    `/chat/conversations${suffix}`,
+  )
+  return data
+}
+
+export async function getConversation(id: string): Promise<ConversationDetailDto> {
+  const { data } = await request<ConversationDetailDto>(`/chat/conversations/${id}`)
+  return data
+}
+
+export async function renameConversation(
+  id: string,
+  title: string,
+): Promise<ConversationDto> {
+  const { data } = await request<ConversationDto>(`/chat/conversations/${id}`, {
+    method: 'PATCH',
+    body: { title },
   })
-  if (!response.ok) {
-    throw new ApiError(`Request failed (HTTP ${response.status})`, response.status)
-  }
-  return (await response.json()) as T
+  return data
 }
 
-export function listConversations(): Promise<ConversationDto[]> {
-  return getJson<ConversationDto[]>('/chat/conversations')
-}
-
-export function getConversation(id: string): Promise<ConversationDetailDto> {
-  return getJson<ConversationDetailDto>(`/chat/conversations/${id}`)
+export async function deleteConversation(id: string): Promise<void> {
+  await request<void>(`/chat/conversations/${id}`, { method: 'DELETE' })
 }
