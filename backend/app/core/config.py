@@ -86,6 +86,27 @@ class Settings(BaseSettings):
     # password five times in a minute, while an attacker does nothing else.
     auth_account_rate_limit_attempts: int = 5
 
+    # --- AI ---
+    # Which adapter the gateway builds. Changing providers is this value plus
+    # a restart -- never a code change. See app/ai/gateway.py.
+    #
+    # Defaults to "echo" so the application still starts on a machine with no
+    # model credentials, which keeps Phases 1-2 runnable and lets frontend
+    # work happen without spending money. A validator below refuses "echo" in
+    # production, so the safe default cannot silently ship.
+    ai_provider: Literal["anthropic", "echo"] = "echo"
+    # SECURITY: read from the environment, never committed, and never sent to
+    # the browser. Every model call is made server-side precisely so this
+    # value stays on the server.
+    anthropic_api_key: str | None = None
+    ai_model: str = "claude-opus-5"
+    # Caps the reply length, which caps the cost of any single request. An
+    # unbounded max_tokens is a way for one user to spend a lot of money.
+    ai_max_tokens: int = 4096
+    # Dev-only knob: makes the echo provider pause between chunks so the
+    # streaming UI can be watched arriving piece by piece. 0 in tests.
+    ai_echo_chunk_delay_seconds: float = 0.0
+
     # --- CORS ---
     # Comma-separated list. Never "*" -- see cors_origin_list.
     cors_origins: str = "http://localhost:5173"
@@ -108,6 +129,28 @@ class Settings(BaseSettings):
                 "SESSION_COOKIE_SECURE must be true in production, otherwise "
                 "the session cookie can be sent over plain HTTP and stolen."
             )
+        return self
+
+    @model_validator(mode="after")
+    def enforce_model_provider_is_usable(self) -> Settings:
+        """Refuse to start if the selected provider cannot actually work.
+
+        Both checks fail at startup rather than on the first chat request. A
+        missing API key discovered at boot is one clear log line; discovered
+        on the first user message it is a 500 in someone's face, and the cause
+        is several layers away from the symptom.
+        """
+        if self.ai_provider == "anthropic" and not self.anthropic_api_key:
+            raise ValueError(
+                "AI_PROVIDER=anthropic requires ANTHROPIC_API_KEY to be set."
+            )
+
+        if self.app_env == "production" and self.ai_provider == "echo":
+            raise ValueError(
+                "AI_PROVIDER=echo is a fake offline provider and must never "
+                "run in production -- it returns canned text, not model output."
+            )
+
         return self
 
     @model_validator(mode="after")

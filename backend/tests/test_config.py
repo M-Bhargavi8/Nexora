@@ -28,6 +28,11 @@ NEXORA_ENV_VARS = (
     "CORS_ORIGINS",
     "LOG_LEVEL",
     "LOG_FORMAT",
+    "AI_PROVIDER",
+    "ANTHROPIC_API_KEY",
+    "AI_MODEL",
+    "AI_MAX_TOKENS",
+    "AI_ECHO_CHUNK_DELAY_SECONDS",
 )
 
 
@@ -61,6 +66,24 @@ def build_settings(**overrides: object) -> Settings:
     }
     values.update(overrides)
     return Settings(_env_file=None, **values)  # type: ignore[arg-type]
+
+
+def build_production_settings(**overrides: object) -> Settings:
+    """Settings that satisfy every production validator.
+
+    Production insists on more than one thing, and that list grows with each
+    phase. Centralising the valid baseline here means a new production rule
+    breaks this one helper, rather than every test that merely happens to
+    build production settings for an unrelated reason.
+    """
+    values: dict[str, object] = {
+        "app_env": "production",
+        "session_cookie_secure": True,
+        "ai_provider": "anthropic",
+        "anthropic_api_key": "sk-not-a-real-key",
+    }
+    values.update(overrides)
+    return build_settings(**values)
 
 
 class TestSecretKey:
@@ -118,7 +141,7 @@ class TestEnvironment:
             build_settings(app_env="staging")
 
     def test_is_production_flag(self) -> None:
-        production = build_settings(app_env="production", session_cookie_secure=True)
+        production = build_production_settings()
 
         assert production.is_production is True
         assert build_settings(app_env="development").is_production is False
@@ -137,12 +160,12 @@ class TestProductionHardening:
         a silent vulnerability.
         """
         with pytest.raises(ValidationError) as exc_info:
-            build_settings(app_env="production", session_cookie_secure=False)
+            build_production_settings(session_cookie_secure=False)
 
         assert "SESSION_COOKIE_SECURE" in str(exc_info.value)
 
     def test_allows_a_secure_session_cookie_in_production(self) -> None:
-        settings = build_settings(app_env="production", session_cookie_secure=True)
+        settings = build_production_settings()
 
         assert settings.session_cookie_secure is True
 
@@ -186,3 +209,36 @@ class TestSameSiteNoneRequiresSecure:
         )
 
         assert settings.session_cookie_samesite == "lax"
+
+
+class TestModelProviderConfig:
+    def test_anthropic_without_an_api_key_refuses_to_start(self) -> None:
+        """Caught at boot as one clear log line, rather than as a 500 in the
+        user's face on the first chat message."""
+        with pytest.raises(ValidationError) as exc_info:
+            build_settings(ai_provider="anthropic", anthropic_api_key=None)
+
+        assert "ANTHROPIC_API_KEY" in str(exc_info.value)
+
+    def test_anthropic_with_an_api_key_is_accepted(self) -> None:
+        settings = build_settings(
+            ai_provider="anthropic", anthropic_api_key="sk-not-a-real-key"
+        )
+
+        assert settings.ai_provider == "anthropic"
+
+    def test_the_fake_provider_is_refused_in_production(self) -> None:
+        """SECURITY: the echo provider returns canned text. Shipping it would
+        mean users reading invented answers believing a model wrote them."""
+        with pytest.raises(ValidationError) as exc_info:
+            build_production_settings(ai_provider="echo")
+
+        assert "AI_PROVIDER" in str(exc_info.value)
+
+    def test_the_fake_provider_is_allowed_in_development(self) -> None:
+        """It is the default, so that the app still starts with no credentials."""
+        assert build_settings(app_env="development").ai_provider == "echo"
+
+    def test_a_token_cap_is_always_set(self) -> None:
+        """An unbounded reply length is an unbounded bill."""
+        assert build_settings().ai_max_tokens > 0

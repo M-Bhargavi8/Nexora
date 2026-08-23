@@ -24,3 +24,8 @@ alembic==1.19.1               # version-controlled schema migrations
 # --- Security ---
 argon2-cffi==25.1.0           # Argon2id password hashing (app/core/security.py).
                               # Runtime, not dev: the app cannot import without it.
+
+# --- AI providers ---
+# Imported only by app/ai/providers/anthropic_provider.py. The gateway imports
+# it lazily, so the offline echo provider runs without it.
+anthropic==1.0.0
