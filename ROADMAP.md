@@ -269,9 +269,72 @@ against a throwaway database. Test accounts and files removed afterwards.
   as attachments, but a file that is malicious *to the person who downloads it*
   is not something this phase detects.
 
-## Phase 6 — RAG ⚪
+## Phase 6 — RAG ✅
 Chunking, embeddings, pgvector, retrieval, contextual answering, source
 references.
+
+**Delivered and verified (2026-08-24):**
+- `EmbeddingProvider` is its own interface, separate from `ModelProvider`,
+  because embeddings and chat generation are bought separately — Anthropic
+  sells no embedding model, so one combined interface would force every
+  adapter to stub out half of it
+- Chunking splits on structure (blank lines → sentences → last-resort cut) with
+  configurable overlap, so a fact straddling a boundary stays findable
+- `file_chunks` stores passages *and* their vectors in PostgreSQL via pgvector.
+  One store, one transaction, one cascade — deleting a file removes its vectors
+  with it, so no second system can hold searchable copies of a deleted document
+- Uploads are indexed automatically; indexing failure never fails the upload
+- Retrieval is cosine similarity (`<=>`) with an IVFFlat index, a result cap,
+  and a **similarity floor** so an unrelated question returns nothing rather
+  than the k nearest irrelevant passages
+- **Every query filters by `user_id`, and it is a required keyword-only
+  argument** — an optional filter is one somebody eventually forgets
+- Retrieved passages go in the *system* prompt inside explicit delimiters, with
+  the rules stated **before** the untrusted text, and the delimiters stripped
+  from the text itself so a document cannot close the block early
+- Citations are built from the retrieval result, never parsed from the model's
+  output, so a citation the model invented can never be displayed as real
+- The UI shows "Answered using N passages", expandable to the exact text,
+  filename and match score — retrieval you can check rather than trust
+- **460 backend tests, 153 frontend tests**, all passing
+
+**Verified against the running stack**, not only in tests:
+- solar question → `solar.txt`; baking question → `baking.txt`; a strong
+  lexical match scored 43%
+- "What is the capital of France" and "Tell me about quantum entanglement" →
+  **no sources**, the similarity floor doing its job
+- a second account got **zero sources** for the first account's documents —
+  including when naming the file id explicitly
+- a genuinely hostile file containing `<<<END_NEXORA_REFERENCE_MATERIAL>>>` and
+  a "SYSTEM OVERRIDE" line was retrieved like any other document, its embedded
+  marker **stripped** (one closing marker in the block, the one NEXORA wrote),
+  and the injected line left **inside** the delimited region
+- migration `0004` upgrades, passes `alembic check`, and downgrades cleanly;
+  the IVFFlat index is built with `vector_cosine_ops`
+
+Test accounts, files and chunks removed afterwards.
+
+**Known limitations, stated plainly:**
+- **The embedding provider is lexical, not semantic.** `hashing` matches on
+  shared vocabulary; it will not connect "I forgot my login" to a passage about
+  resetting a password. The *pipeline* is what this phase proves. Retrieval
+  quality needs a real embedding model, which is a new adapter and a key.
+- Because it uses the hashing trick at 512 dimensions, out-of-vocabulary
+  tokens can collide into a document's buckets: nonsense like `zzzz qqqq vvvv`
+  scored 19% against an unrelated file, just above the 0.15 floor. Real
+  off-topic questions behaved correctly. A real model removes this.
+- Changing `EMBEDDING_PROVIDER` invalidates every stored vector. Nothing
+  detects this yet — vectors from two models compare as confident nonsense
+  rather than erroring. Re-embed everything on a change.
+- IVFFlat is **approximate**: it can miss a true nearest neighbour, and it
+  needs rebuilding after a bulk import because it picks centroids from
+  whatever is present when built.
+- Indexing happens inside the upload request, so a large document makes the
+  user wait. Same trade-off as extraction; a job queue is the real answer.
+- Files uploaded before this phase have no chunks. There is no backfill
+  command yet — re-upload, or one is needed.
+- No reranking, no query rewriting, no hybrid keyword+vector search. All
+  standard next steps once a real embedding model is in place.
 
 ## Phase 7 — Tools ⚪
 Calculator, web search, file analysis, Python/data analysis, code analysis —
