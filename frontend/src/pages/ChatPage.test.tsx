@@ -263,7 +263,15 @@ describe('regenerating', () => {
       screen.getByRole('button', { name: 'Regenerate reply' }),
     )
 
-    expect(await screen.findByText('A different answer')).toBeInTheDocument()
+    // Re-queried inside waitFor rather than holding the node `findByText`
+    // returned. Regenerating gives the reply a new local id, so React unmounts
+    // the old bubble and mounts a new one -- and the sidebar refresh that runs
+    // when streaming stops triggers another render on top. A node captured
+    // before either can be detached by the time the assertion reads it, which
+    // fails with a confusing "element could not be found in the document".
+    await waitFor(() =>
+      expect(screen.getByText('A different answer')).toBeInTheDocument(),
+    )
     // Two answers to one question would misrepresent what is stored.
     expect(screen.queryByText('Hello there')).not.toBeInTheDocument()
     expect(screen.getByText('a question')).toBeInTheDocument()
@@ -671,5 +679,130 @@ describe('editing a question', () => {
     // Nothing changed, so there is nothing to re-ask -- and re-asking would
     // still cost a full model call.
     expect(screen.getByRole('button', { name: 'Send edit' })).toBeDisabled()
+  })
+})
+
+describe('showing sources', () => {
+  /** Drive a reply that reports retrieved passages. */
+  function respondWithSources(sources: chatApi.Source[]) {
+    vi.mocked(chatApi.streamChat).mockImplementation(async ({ onEvent }) => {
+      onEvent({ type: 'start', conversation_id: 'c1', user_message_id: 'u1' })
+      onEvent({ type: 'sources', sources })
+      onEvent({ type: 'delta', text: 'Roughly four kilowatts.' })
+      onEvent({
+        type: 'done',
+        conversation_id: 'c1',
+        message_id: 'm1',
+        model: 'echo',
+        input_tokens: null,
+        output_tokens: null,
+      })
+    })
+  }
+
+  const SOLAR_SOURCE: chatApi.Source = {
+    index: 1,
+    file_id: 'f1',
+    filename: 'solar.txt',
+    chunk_id: 'ch1',
+    position: 0,
+    similarity: 0.82,
+    preview: 'A residential solar installation typically produces four kilowatts.',
+  }
+
+  it('says how many passages were used', async () => {
+    respondWithSources([SOLAR_SOURCE])
+    renderChatPage()
+    const composer = await screen.findByLabelText('Message')
+
+    await userEvent.type(composer, 'how much power?{Enter}')
+
+    expect(
+      await screen.findByText(/Answered using 1 passage from your files/),
+    ).toBeInTheDocument()
+  })
+
+  it('pluralises correctly', async () => {
+    respondWithSources([SOLAR_SOURCE, { ...SOLAR_SOURCE, index: 2, chunk_id: 'ch2' }])
+    renderChatPage()
+    const composer = await screen.findByLabelText('Message')
+
+    await userEvent.type(composer, 'how much power?{Enter}')
+
+    expect(
+      await screen.findByText(/Answered using 2 passages from your files/),
+    ).toBeInTheDocument()
+  })
+
+  it('reveals the passage that was actually read', async () => {
+    respondWithSources([SOLAR_SOURCE])
+    renderChatPage()
+    const composer = await screen.findByLabelText('Message')
+    await userEvent.type(composer, 'how much power?{Enter}')
+    await screen.findByText(/Answered using 1 passage/)
+
+    await userEvent.click(screen.getByRole('button', { name: /Answered using/ }))
+
+    // An answer citing a document is only checkable if the passage is visible.
+    expect(await screen.findByText(/produces four kilowatts/)).toBeInTheDocument()
+    expect(screen.getByText('solar.txt')).toBeInTheDocument()
+    expect(screen.getByText('[Source 1]')).toBeInTheDocument()
+    expect(screen.getByText('82% match')).toBeInTheDocument()
+  })
+
+  it('shows nothing when no documents were used', async () => {
+    // The default mock streams no `sources` event at all.
+    renderChatPage()
+    const composer = await screen.findByLabelText('Message')
+
+    await userEvent.type(composer, 'a general question{Enter}')
+    await screen.findByText('Hello there')
+
+    // Silence is the honest signal: nothing was read, so nothing is claimed.
+    expect(screen.queryByText(/Answered using/)).not.toBeInTheDocument()
+  })
+
+  it('renders a passage as text, never as markup', async () => {
+    respondWithSources([
+      { ...SOLAR_SOURCE, preview: '<img src=x onerror="alert(1)">' },
+    ])
+    renderChatPage()
+    const composer = await screen.findByLabelText('Message')
+    await userEvent.type(composer, 'question{Enter}')
+    await screen.findByText(/Answered using 1 passage/)
+
+    await userEvent.click(screen.getByRole('button', { name: /Answered using/ }))
+
+    // SECURITY: this text came out of a file NEXORA did not write. Rendering
+    // it as markup would undo the upload validation at the very last step.
+    const shown = await screen.findByText('<img src=x onerror="alert(1)">')
+    expect(shown.querySelector('img')).toBeNull()
+  })
+
+  it('keeps sources attached to the reply they informed', async () => {
+    respondWithSources([SOLAR_SOURCE])
+    renderChatPage()
+    const composer = await screen.findByLabelText('Message')
+    await userEvent.type(composer, 'first question{Enter}')
+    await screen.findByText(/Answered using 1 passage/)
+
+    // A second turn that retrieves nothing.
+    vi.mocked(chatApi.streamChat).mockImplementation(async ({ onEvent }) => {
+      onEvent({ type: 'start', conversation_id: 'c1', user_message_id: 'u2' })
+      onEvent({ type: 'delta', text: 'No documents needed.' })
+      onEvent({
+        type: 'done',
+        conversation_id: 'c1',
+        message_id: 'm2',
+        model: 'echo',
+        input_tokens: null,
+        output_tokens: null,
+      })
+    })
+    await userEvent.type(composer, 'second question{Enter}')
+    await screen.findByText('No documents needed.')
+
+    // Scrolling back must still show which answer was grounded in a document.
+    expect(screen.getAllByText(/Answered using/)).toHaveLength(1)
   })
 })
