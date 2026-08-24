@@ -17,6 +17,7 @@ import {
   streamChat,
   type ChatEvent,
   type ChatMessageDto,
+  type Source,
 } from '../lib/chat'
 
 /** A message on screen. `pending` marks the reply currently being streamed. */
@@ -33,6 +34,13 @@ export interface DisplayMessage {
    * UI uses this to decide whether to offer the option at all.
    */
   persisted?: boolean
+  /**
+   * Passages from the user's documents that were given to the model for this
+   * turn. Attached to the reply they informed, so scrolling back through a
+   * conversation shows which answers were grounded in a document and which
+   * were not.
+   */
+  sources?: Source[]
 }
 
 export interface UseChat {
@@ -168,6 +176,11 @@ export function useChat(): UseChat {
                 ),
               )
             }
+            break
+          case 'sources':
+            // Arrives before the first token, so the interface can show what
+            // NEXORA read while the answer is still being written.
+            markAssistant({ sources: event.sources })
             break
           case 'delta':
             // Append rather than replace: each event carries one fragment, and

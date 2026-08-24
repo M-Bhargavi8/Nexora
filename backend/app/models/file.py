@@ -37,6 +37,7 @@ from app.core.clock import utcnow
 from app.db.base import Base
 
 if TYPE_CHECKING:
+    from app.models.chunk import FileChunk
     from app.models.user import User
 
 # Long enough for a real document name, short enough that the column is not a
@@ -125,6 +126,16 @@ class File(Base):
     )
 
     user: Mapped[User] = relationship(back_populates="files")
+
+    chunks: Mapped[list[FileChunk]] = relationship(
+        back_populates="file",
+        # Deleting a file removes its chunks and their vectors in the same
+        # transaction. This is the payoff for keeping vectors in PostgreSQL
+        # rather than a separate vector store: there is no second system that
+        # could be left holding searchable copies of a deleted document.
+        cascade="all, delete-orphan",
+        order_by="FileChunk.position",
+    )
 
     __table_args__ = (
         # Defence in depth: the ORM restricts `status`, but a script writing

@@ -38,9 +38,28 @@ export interface ConversationPageDto {
   has_more: boolean
 }
 
+/**
+ * A passage NEXORA retrieved from one of your documents and gave to the model.
+ *
+ * Built by the server from the retrieval result, never parsed out of the
+ * model's reply -- a citation the model invented must never be displayed as
+ * though it were something actually read.
+ */
+export interface Source {
+  index: number
+  file_id: string
+  filename: string
+  chunk_id: string
+  position: number
+  /** Cosine similarity in [0, 1]. Higher means a closer match. */
+  similarity: number
+  preview: string
+}
+
 /** The events the server sends inside the stream. Mirrors app/api/routes/chat.py. */
 export type ChatEvent =
   | { type: 'start'; conversation_id: string; user_message_id: string }
+  | { type: 'sources'; sources: Source[] }
   | { type: 'delta'; text: string }
   | {
       type: 'done'

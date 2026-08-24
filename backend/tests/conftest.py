@@ -42,12 +42,14 @@ TEST_UPLOAD_DIR = Path(tempfile.mkdtemp(prefix="nexora-test-uploads-"))
 os.environ["UPLOAD_DIR"] = str(TEST_UPLOAD_DIR)
 # ------------------------------------------------------------------------
 
+import asyncio  # noqa: E402
 from collections.abc import AsyncGenerator, Iterator  # noqa: E402
 
 import pytest  # noqa: E402
 from fastapi import FastAPI  # noqa: E402
 from httpx import ASGITransport, AsyncClient  # noqa: E402
 from sqlalchemy import event  # noqa: E402
+from sqlalchemy import text as sa_text  # noqa: E402
 from sqlalchemy.ext.asyncio import (  # noqa: E402
     AsyncEngine,
     AsyncSession,
@@ -194,6 +196,126 @@ async def client(app: FastAPI) -> AsyncGenerator[AsyncClient, None]:
         # Browsers send an Origin header on cross-origin requests; the CSRF
         # middleware checks it. Setting an allowed origin here makes the test
         # client behave like the real frontend.
+        headers={"Origin": "http://localhost:5173"},
+    ) as async_client:
+        yield async_client
+
+
+# --- PostgreSQL fixtures, for the parts SQLite genuinely cannot test --------
+#
+# Vector similarity search is pgvector, and pgvector is PostgreSQL. Emulating
+# `<=>` in Python would risk the suite passing against a reimplementation while
+# production ran something different -- which is the failure mode a test is
+# supposed to prevent. So these tests use a real database, and skip with a
+# clear reason when one is not available rather than silently not running.
+
+#: Overridable so CI can point at its own instance. The default matches
+#: docker-compose.yml, which is what a developer here already has running.
+TEST_PG_URL = os.environ.get(
+    "TEST_DATABASE_URL",
+    "postgresql+asyncpg://nexora:nexora_dev_password@localhost:5432/nexora_test",
+)
+
+
+async def _postgres_available(url: str) -> str | None:
+    """Return None if usable, otherwise a reason to skip."""
+    from sqlalchemy.ext.asyncio import create_async_engine as _create
+
+    admin_url = url.rsplit("/", 1)[0] + "/postgres"
+    try:
+        admin = _create(admin_url, isolation_level="AUTOCOMMIT")
+        database = url.rsplit("/", 1)[1]
+        async with admin.connect() as connection:
+            existing = await connection.execute(
+                sa_text("SELECT 1 FROM pg_database WHERE datname = :name"),
+                {"name": database},
+            )
+            if existing.scalar() is None:
+                # Identifier, not a bind parameter -- CREATE DATABASE takes no
+                # placeholders. The name comes from our own configuration, and
+                # is quoted so an odd one cannot break the statement.
+                await connection.execute(sa_text(f'CREATE DATABASE "{database}"'))
+        await admin.dispose()
+    except Exception as error:  # noqa: BLE001 - any failure means "skip"
+        return f"PostgreSQL not available at {admin_url}: {error}"
+
+    try:
+        engine = _create(url)
+        async with engine.begin() as connection:
+            await connection.execute(sa_text("CREATE EXTENSION IF NOT EXISTS vector"))
+        await engine.dispose()
+    except Exception as error:  # noqa: BLE001
+        return f"pgvector extension unavailable: {error}"
+
+    return None
+
+
+@pytest.fixture(scope="session")
+def postgres_url() -> str:
+    """The test database URL, or skip the whole module."""
+    reason = asyncio.run(_postgres_available(TEST_PG_URL))
+    if reason:
+        pytest.skip(reason, allow_module_level=True)
+    return TEST_PG_URL
+
+
+@pytest.fixture
+async def pg_engine(postgres_url: str) -> AsyncGenerator[AsyncEngine, None]:
+    """A real PostgreSQL engine with a freshly created schema.
+
+    Tables are dropped and recreated per test rather than wrapped in a rolled
+    back transaction, because pgvector index behaviour is part of what is under
+    test and index state does not roll back cleanly.
+    """
+    engine = create_async_engine(postgres_url)
+
+    async with engine.begin() as connection:
+        await connection.execute(sa_text("CREATE EXTENSION IF NOT EXISTS vector"))
+        await connection.run_sync(Base.metadata.drop_all)
+        await connection.run_sync(Base.metadata.create_all)
+
+    yield engine
+
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.drop_all)
+    await engine.dispose()
+
+
+@pytest.fixture
+def pg_session_factory(pg_engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
+    return async_sessionmaker(pg_engine, class_=AsyncSession, expire_on_commit=False)
+
+
+@pytest.fixture
+async def pg_db(
+    pg_session_factory: async_sessionmaker[AsyncSession],
+) -> AsyncGenerator[AsyncSession, None]:
+    async with pg_session_factory() as session:
+        yield session
+
+
+@pytest.fixture
+def pg_app(
+    settings: Settings, pg_session_factory: async_sessionmaker[AsyncSession]
+) -> FastAPI:
+    """The application wired to PostgreSQL instead of SQLite."""
+    application = create_app(settings)
+
+    async def override_get_db() -> AsyncGenerator[AsyncSession, None]:
+        async with pg_session_factory() as session:
+            yield session
+
+    application.dependency_overrides[get_db] = override_get_db
+    application.dependency_overrides[get_db_session_factory] = lambda: pg_session_factory
+    return application
+
+
+@pytest.fixture
+async def pg_client(pg_app: FastAPI) -> AsyncGenerator[AsyncClient, None]:
+    transport = ASGITransport(app=pg_app)
+    async with AsyncClient(
+        transport=transport,
+        base_url="http://testserver",
         headers={"Origin": "http://localhost:5173"},
     ) as async_client:
         yield async_client

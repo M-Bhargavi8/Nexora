@@ -12,8 +12,9 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-from app.ai.base import ModelProvider
+from app.ai.base import EmbeddingProvider, ModelProvider
 from app.ai.providers.echo import EchoProvider
+from app.ai.providers.hashing_embeddings import HashingEmbeddingProvider
 from app.core.config import get_settings
 from app.core.logging import get_logger
 
@@ -58,3 +59,33 @@ def get_provider() -> ModelProvider:
     # Literal without adding a branch here fails loudly instead of silently
     # returning None.
     raise ValueError(f"Unknown AI provider: {provider_name!r}")
+
+
+@lru_cache(maxsize=1)
+def get_embedding_provider() -> EmbeddingProvider:
+    """Build (once) and return the configured embedding provider.
+
+    Selected separately from the chat provider, because embeddings and chat
+    generation are bought separately -- Anthropic sells no embedding model, so
+    a deployment running Anthropic for chat needs something else here.
+
+    Adding a hosted provider is a new class implementing `EmbeddingProvider`,
+    a name in the `embedding_provider` Literal, and a branch below. Nothing
+    above this function changes.
+
+    IMPORTANT: switching providers invalidates every stored vector. Embeddings
+    from two different models are not comparable -- searching new query vectors
+    against old stored ones returns confident nonsense rather than an error.
+    Changing this setting means re-embedding everything.
+    """
+    settings = get_settings()
+    provider_name = settings.embedding_provider
+
+    if provider_name == "hashing":
+        logger.warning(
+            "Using the offline hashing embedding provider -- retrieval is "
+            "lexical (shared words) and not semantic"
+        )
+        return HashingEmbeddingProvider()
+
+    raise ValueError(f"Unknown embedding provider: {provider_name!r}")

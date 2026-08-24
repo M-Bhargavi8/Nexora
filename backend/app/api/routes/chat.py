@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
@@ -32,6 +32,7 @@ from app.ai.base import (
     TextDelta,
     Usage,
 )
+from app.ai.context import BASE_SYSTEM_PROMPT, build_system_prompt, citations_payload
 from app.ai.gateway import get_provider
 from app.api.dependencies import CurrentUser, DbSession
 from app.core.config import get_settings
@@ -51,6 +52,7 @@ from app.schemas.chat import (
     RegenerateRequest,
     RenameConversationRequest,
 )
+from app.services.retrieval import RetrievedChunk, search_chunks
 from app.services.chat import (
     append_message,
     create_conversation,
@@ -84,10 +86,9 @@ def reset_chat_rate_limits() -> None:
     chat_rate_limiter.clear()
 
 
-SYSTEM_PROMPT = (
-    "You are NEXORA, an intelligent AI workspace. Be accurate and concise. "
-    "If you do not know something, say so rather than guessing."
-)
+# Re-exported for tests and older imports. The prompt now lives beside the
+# retrieval rules it has to stay consistent with -- see app/ai/context.py.
+SYSTEM_PROMPT = BASE_SYSTEM_PROMPT
 
 _CONVERSATION_NOT_FOUND = HTTPException(
     status_code=status.HTTP_404_NOT_FOUND,
@@ -101,6 +102,33 @@ MAX_PAGE_SIZE = 100
 # A search term longer than a title cannot usefully match one, and an
 # unbounded term is an unbounded LIKE pattern to scan every row against.
 MAX_SEARCH_LENGTH = 200
+
+
+async def _retrieve_context(
+    db: DbSession,
+    *,
+    query: str,
+    user_id: uuid.UUID,
+    file_ids: list[uuid.UUID] | None,
+) -> list[RetrievedChunk]:
+    """Find passages from this user's documents that bear on their question.
+
+    Failure is deliberately not fatal. If retrieval breaks -- the embedding
+    provider is down, the vector index is rebuilding -- the user gets an answer
+    without their documents rather than no answer at all. A degraded reply
+    beats a 500, and the interface shows no sources, so nothing is claimed that
+    was not read.
+    """
+    try:
+        return await search_chunks(
+            db, query=query, user_id=user_id, file_ids=file_ids
+        )
+    except Exception:  # noqa: BLE001 - retrieval must not break chat
+        logger.exception(
+            "Retrieval failed; answering without documents",
+            extra={"user_id": str(user_id)},
+        )
+        return []
 
 
 def _enforce_chat_rate_limit(user_id: uuid.UUID) -> None:
@@ -185,12 +213,18 @@ async def _stream_reply(
     conversation_id: uuid.UUID,
     user_message_id: uuid.UUID,
     history: list[ChatMessage],
+    retrieved: Sequence[RetrievedChunk] = (),
 ) -> AsyncIterator[str]:
     """Generate the reply, framing each fragment as an SSE event."""
     provider = get_provider()
     parts: list[str] = []
     usage: Usage | None = None
     failure: tuple[str, str] | None = None
+
+    # Retrieved passages go in the *system* prompt inside explicit delimiters,
+    # never concatenated into the user's message -- see app/ai/context.py for
+    # why that separation is a security control rather than formatting.
+    system_prompt = build_system_prompt(retrieved)
 
     # Sent first so the client learns the conversation id immediately. When
     # the request omitted one, this is the only way it finds out which
@@ -203,8 +237,15 @@ async def _stream_reply(
         }
     )
 
+    if retrieved:
+        # Sent before the answer, so the interface can show what NEXORA read
+        # *while* it is answering. Built from the retrieval result, never
+        # parsed out of the model's output -- a citation the model invented
+        # must never become one the UI displays as real.
+        yield _sse({"type": "sources", "sources": citations_payload(retrieved)})
+
     try:
-        async for event in provider.stream(history, system=SYSTEM_PROMPT):
+        async for event in provider.stream(history, system=system_prompt):
             if isinstance(event, TextDelta):
                 parts.append(event.text)
                 yield _sse({"type": "delta", "text": event.text})
@@ -298,8 +339,16 @@ async def send_message(
     # still open. It already includes the message just appended.
     history = await load_history(db, conversation_id=conversation.id)
 
+    # Retrieval also happens here, for the same reason: the generator below
+    # runs after this handler returns, by which point `db` is gone.
+    retrieved = await _retrieve_context(
+        db, query=payload.content, user_id=user.id, file_ids=payload.file_ids
+    )
+
     return StreamingResponse(
-        _stream_reply(session_factory, conversation.id, user_message.id, history),
+        _stream_reply(
+            session_factory, conversation.id, user_message.id, history, retrieved
+        ),
         media_type="text/event-stream",
         headers={
             # Without this a proxy may hold the whole response and deliver it
@@ -362,10 +411,20 @@ async def regenerate(
             detail="There is no question to regenerate an answer for.",
         )
 
+    # Retrieval runs again against the same question, rather than reusing what
+    # the first attempt found. Documents may have been uploaded or deleted
+    # since, and a regenerated answer citing a file the user has removed would
+    # be worse than a slightly slower one.
+    retrieved = await _retrieve_context(
+        db, query=question.content, user_id=user.id, file_ids=None
+    )
+
     return StreamingResponse(
         # No *new* user message exists, so the `start` event reports the
         # existing question -- which is the turn being answered.
-        _stream_reply(session_factory, conversation.id, question.id, history),
+        _stream_reply(
+            session_factory, conversation.id, question.id, history, retrieved
+        ),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -430,8 +489,17 @@ async def edit_message(
 
     history = await load_history(db, conversation_id=conversation.id)
 
+    # Retrieved against the *edited* wording -- the whole point of the edit is
+    # that the question changed, so passages found for the old text would
+    # answer a question no longer being asked.
+    retrieved = await _retrieve_context(
+        db, query=payload.content, user_id=user.id, file_ids=None
+    )
+
     return StreamingResponse(
-        _stream_reply(session_factory, conversation.id, message.id, history),
+        _stream_reply(
+            session_factory, conversation.id, message.id, history, retrieved
+        ),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

@@ -6,13 +6,17 @@ above it imports a vendor SDK. When a provider changes its pricing, deprecates
 a model, or is replaced by something better, we write one new class down here
 and nothing else changes.
 
-**Why only `stream()` for now.** `ARCHITECTURE.md` §3 sketches a fuller
-interface: `generate`, `stream`, `embed`, `vision`, `tool_call`. Declaring all
-five today would mean four abstract methods that every provider must stub out
-and no caller ever invokes -- dead weight that still has to be maintained.
-They arrive with the phase that needs them: `embed` in Phase 6 (RAG),
-`vision` in Phase 5 (images), `tool_call` in Phase 7 (tools). The interface
-grows with real requirements, not with speculation.
+**Why the interface is split.** `ARCHITECTURE.md` §3 sketches `generate`,
+`stream`, `embed`, `vision`, `tool_call` on one class. Phase 6 shows why that
+would be wrong: embedding and chat generation are bought separately in the real
+world. Anthropic sells no embedding model at all, so a single interface would
+force the chat adapter to stub out `embed` and every embedding adapter to stub
+out `stream`.
+
+So `EmbeddingProvider` is its own interface, selected by its own setting. A
+deployment can run Anthropic for chat and something else entirely for
+embeddings, which is the normal arrangement rather than an exotic one.
+`vision` and `tool_call` still arrive with the phases that need them.
 """
 
 from __future__ import annotations
@@ -128,6 +132,45 @@ class ModelProvider(ABC):
         returning a coroutine that must be awaited first. Typing it this way
         means callers write `async for chunk in provider.stream(...)` without
         an extra `await`, and the type checker agrees with them.
+
+        Raises a `ModelProviderError` subclass on failure.
+        """
+        raise NotImplementedError
+
+
+class EmbeddingProvider(ABC):
+    """Turns text into vectors that can be compared for similarity.
+
+    Separate from `ModelProvider` on purpose -- see the module docstring.
+
+    **What an embedding is**, since this is the first place NEXORA needs one: a
+    fixed-length list of numbers standing for a piece of text, arranged so that
+    texts with similar meaning end up close together in that space. "How do I
+    reset my password" and "I forgot my login" share almost no words, but a
+    good embedding model places them near each other. That is the entire reason
+    retrieval can find a relevant passage that does not contain the words the
+    question was asked with.
+    """
+
+    #: Short identifier used in logs.
+    name: str
+
+    #: Length of the vectors produced. Fixed per model, and baked into the
+    #: database column -- changing it means re-embedding every stored chunk,
+    #: because vectors from two different models are not comparable.
+    dimensions: int
+
+    @abstractmethod
+    async def embed(self, texts: Sequence[str]) -> list[list[float]]:
+        """Embed a batch of texts, returning one vector per input, in order.
+
+        Batched rather than one-at-a-time because hosted embedding APIs charge
+        and rate-limit per *request*: embedding 200 chunks individually is 200
+        round trips for work that fits in a handful.
+
+        Implementations must return vectors of exactly `dimensions` length, and
+        must not reorder or drop inputs -- the caller pairs the results with
+        its chunks positionally.
 
         Raises a `ModelProviderError` subclass on failure.
         """

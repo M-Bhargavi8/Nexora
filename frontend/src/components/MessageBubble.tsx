@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { CopyButton } from './CopyButton'
 import { Markdown } from './Markdown'
+import { SourceList } from './SourceList'
 import type { DisplayMessage } from '../hooks/useChat'
 
 interface MessageBubbleProps {
@@ -170,6 +171,13 @@ export function MessageBubble({ message, onEdit }: MessageBubbleProps) {
             </p>
           )}
         </div>
+
+        {/* Shown even while the reply streams: sources arrive before the
+            first token, and seeing what NEXORA is reading is useful precisely
+            while it is still answering. */}
+        {message.sources && message.sources.length > 0 && (
+          <SourceList sources={message.sources} />
+        )}
 
         {/* Only once the reply is complete -- a copy button on half an answer
             copies half an answer. Revealed on hover or keyboard focus, so it

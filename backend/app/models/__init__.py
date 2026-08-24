@@ -6,6 +6,7 @@ never imported is absent from that metadata. Alembic would then conclude its
 table should not exist and helpfully generate a migration that **drops** it.
 """
 
+from app.models.chunk import FileChunk
 from app.models.conversation import Conversation
 from app.models.file import File, FileStatus
 from app.models.message import Message, MessageRole
@@ -15,6 +16,7 @@ from app.models.user import User
 __all__ = [
     "Conversation",
     "File",
+    "FileChunk",
     "FileStatus",
     "Message",
     "MessageRole",

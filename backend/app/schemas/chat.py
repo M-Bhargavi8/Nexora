@@ -23,6 +23,12 @@ from app.models.conversation import TITLE_MAX_LENGTH
 MAX_MESSAGE_LENGTH = 32_000
 
 
+# A ceiling on how many documents one question may be scoped to. Without it a
+# client could name every file it owns and turn one question into an enormous
+# `IN (...)` clause.
+MAX_SCOPED_FILES = 20
+
+
 class ChatRequest(BaseModel):
     """One user turn.
 
@@ -36,6 +42,17 @@ class ChatRequest(BaseModel):
         min_length=1,
         max_length=MAX_MESSAGE_LENGTH,
         description="The user's message.",
+    )
+    # Restricts retrieval to specific documents. Omitted (or empty) searches
+    # everything the user has uploaded.
+    #
+    # SECURITY: naming a file here does not grant access to it. Retrieval
+    # filters by owner regardless, so listing someone else's file id simply
+    # narrows the search to nothing.
+    file_ids: list[uuid.UUID] | None = Field(
+        default=None,
+        max_length=MAX_SCOPED_FILES,
+        description="Limit retrieval to these files. Omit to search them all.",
     )
 
 

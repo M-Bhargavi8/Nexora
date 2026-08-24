@@ -137,6 +137,24 @@ async def create_file(
             "status": status.value,
         },
     )
+
+    # Index for retrieval. Imported here rather than at module scope because
+    # `retrieval` imports the AI gateway, and the gateway imports settings --
+    # a top-level import would make uploading a file depend on the embedding
+    # provider being constructible.
+    from app.services.retrieval import index_file
+
+    try:
+        await index_file(db, file=file)
+    except Exception:  # noqa: BLE001 - indexing must not fail the upload
+        # The file is stored and readable; only search is affected. Losing the
+        # upload because the embedding provider was briefly unavailable would
+        # be a much worse outcome than a file that is not yet searchable.
+        logger.exception(
+            "Failed to index an uploaded file for retrieval",
+            extra={"file_id": str(file.id)},
+        )
+
     return file
 
 

@@ -139,6 +139,40 @@ class Settings(BaseSettings):
     upload_rate_limit_attempts: int = 20
     upload_rate_limit_window_seconds: int = 60
 
+    # --- Retrieval (RAG) ---
+    # Which embedding adapter the gateway builds. Separate from `ai_provider`
+    # because embeddings and chat generation are bought separately.
+    #
+    # WARNING: changing this invalidates every stored vector. Embeddings from
+    # two models are not comparable, and searching across them returns
+    # confident nonsense rather than an error. Re-embed everything.
+    embedding_provider: Literal["hashing"] = "hashing"
+
+    # Target size of one chunk, in characters.
+    #
+    # The trade-off, which has no universally right answer: small chunks
+    # retrieve precisely but arrive without context, so a passage may be
+    # returned without the sentence that gave it meaning. Large chunks carry
+    # their context but dilute the match and cost more tokens per hit. ~1200
+    # characters is roughly a substantial paragraph.
+    chunk_size_characters: int = 1200
+    # How much of the previous chunk each one repeats. Overlap exists because a
+    # fact split across a boundary would otherwise be retrievable from neither
+    # half -- the sentence that names the subject lands in one chunk and the
+    # figure in the next.
+    chunk_overlap_characters: int = 200
+    # How many chunks a search returns. Each one is sent to the model, so this
+    # is directly a cost and a context-window decision, not just a quality one.
+    retrieval_top_k: int = 5
+    # Cosine similarity below this is treated as "no match".
+    #
+    # Without a floor, retrieval *always* returns its k nearest chunks, however
+    # irrelevant -- ask about the weather with a tax return uploaded and you
+    # get five passages about tax, presented as though they were relevant.
+    # Returning nothing is the honest answer to a question the documents do not
+    # address.
+    retrieval_min_similarity: float = 0.15
+
     # --- CORS ---
     # Comma-separated list. Never "*" -- see cors_origin_list.
     cors_origins: str = "http://localhost:5173"
@@ -183,6 +217,18 @@ class Settings(BaseSettings):
                 "run in production -- it returns canned text, not model output."
             )
 
+        # NOTE: there is deliberately no production guard on
+        # `embedding_provider`, unlike the one above for `ai_provider`.
+        #
+        # The echo chat provider returns *fabricated* text, and a real
+        # alternative exists, so refusing to boot is right. The hashing
+        # embedding provider returns genuine -- merely weak -- retrieval, and
+        # right now it is the only implementation there is. Failing startup
+        # would make the whole application unbootable in production, including
+        # the chat that has nothing to do with retrieval.
+        #
+        # It warns loudly instead, in `get_embedding_provider()`. A guard
+        # belongs here the moment a second provider exists to switch to.
         return self
 
     @model_validator(mode="after")
