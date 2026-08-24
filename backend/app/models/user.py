@@ -14,6 +14,7 @@ from app.db.base import Base
 
 if TYPE_CHECKING:  # imported only for type checking, avoids a circular import
     from app.models.conversation import Conversation
+    from app.models.file import File
     from app.models.session import UserSession
 
 # 64 characters for the local part + "@" + 255 for the domain is the maximum
@@ -73,6 +74,16 @@ class User(Base):
         # Deleting a user removes their conversations, and the messages inside
         # them cascade in turn. Deleting an account should not leave its chat
         # history readable in the database.
+        cascade="all, delete-orphan",
+    )
+
+    files: Mapped[list[File]] = relationship(
+        back_populates="user",
+        # Removes the database rows. KNOWN GAP: the uploaded bytes live on
+        # disk, which has no foreign keys, so this cascade orphans them. There
+        # is no account-deletion feature yet; when one is built it must unlink
+        # each file's storage before deleting the user, because afterwards the
+        # rows naming those files are gone and nothing knows what to remove.
         cascade="all, delete-orphan",
     )
 

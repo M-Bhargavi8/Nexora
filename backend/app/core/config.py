@@ -118,6 +118,27 @@ class Settings(BaseSettings):
     # streaming UI can be watched arriving piece by piece. 0 in tests.
     ai_echo_chunk_delay_seconds: float = 0.0
 
+    # --- File uploads ---
+    # Where uploaded bytes are written. Kept outside the source tree so an
+    # uploaded file can never be picked up as application code, and so the
+    # directory can be a mounted volume in production.
+    upload_dir: Path = BACKEND_DIR / "var" / "uploads"
+    # SECURITY/COST: the hard ceiling on one upload. Enforced while streaming,
+    # not by trusting the Content-Length header a client sends. 20MB is
+    # comfortable for documents and small enough that a handful of concurrent
+    # uploads cannot exhaust disk or memory.
+    max_upload_bytes: int = 20 * 1024 * 1024
+    # DOCX and XLSX are ZIP archives, so a small upload can decompress to
+    # something enormous -- a "zip bomb". Extraction stops once this much text
+    # has been produced, which bounds both memory and the eventual prompt.
+    max_extracted_characters: int = 1_000_000
+    # Bounds how long parsing one PDF can take. A malformed or hostile file
+    # with a huge page count is a CPU denial of service otherwise.
+    max_pdf_pages: int = 500
+    # Uploads are authenticated, so this is keyed by user like the chat limit.
+    upload_rate_limit_attempts: int = 20
+    upload_rate_limit_window_seconds: int = 60
+
     # --- CORS ---
     # Comma-separated list. Never "*" -- see cors_origin_list.
     cors_origins: str = "http://localhost:5173"

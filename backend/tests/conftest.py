@@ -20,6 +20,9 @@ need a real PostgreSQL instance.
 from __future__ import annotations
 
 import os
+import shutil
+import tempfile
+from pathlib import Path
 
 # --- Must run before any `app.*` import ---------------------------------
 # Real environment variables take priority over the `.env` file in
@@ -31,9 +34,15 @@ os.environ["DATABASE_URL"] = (
 )
 os.environ["CORS_ORIGINS"] = "http://localhost:5173"
 os.environ["LOG_LEVEL"] = "WARNING"  # keep test output readable
+
+# Uploads go to a throwaway directory, never to the real `backend/var/uploads`.
+# Without this the suite would leave files behind on the developer's machine
+# and, worse, tests would see each other's uploads.
+TEST_UPLOAD_DIR = Path(tempfile.mkdtemp(prefix="nexora-test-uploads-"))
+os.environ["UPLOAD_DIR"] = str(TEST_UPLOAD_DIR)
 # ------------------------------------------------------------------------
 
-from collections.abc import AsyncGenerator  # noqa: E402
+from collections.abc import AsyncGenerator, Iterator  # noqa: E402
 
 import pytest  # noqa: E402
 from fastapi import FastAPI  # noqa: E402
@@ -50,6 +59,7 @@ from sqlalchemy.pool import StaticPool  # noqa: E402
 import app.models  # noqa: F401,E402  registers models on Base.metadata
 from app.api.routes.auth import reset_auth_rate_limits  # noqa: E402
 from app.api.routes.chat import reset_chat_rate_limits  # noqa: E402
+from app.api.routes.files import reset_upload_rate_limits  # noqa: E402
 from app.core.config import Settings, get_settings  # noqa: E402
 from app.db.base import Base  # noqa: E402
 from app.db.session import get_db, get_db_session_factory  # noqa: E402
@@ -76,6 +86,24 @@ def reset_rate_limiter() -> None:
     """
     reset_auth_rate_limits()
     reset_chat_rate_limits()
+    reset_upload_rate_limits()
+
+
+@pytest.fixture(autouse=True)
+def clean_upload_dir() -> Iterator[None]:
+    """Empty the upload directory after each test.
+
+    Files on disk are not part of the database transaction, so nothing else
+    rolls them back. Without this a test that counts stored files would be
+    measuring every previous test's uploads too.
+    """
+    yield
+    if TEST_UPLOAD_DIR.exists():
+        for leftover in TEST_UPLOAD_DIR.iterdir():
+            if leftover.is_file():
+                leftover.unlink(missing_ok=True)
+            else:
+                shutil.rmtree(leftover, ignore_errors=True)
 
 
 @pytest.fixture

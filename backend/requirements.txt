@@ -25,6 +25,25 @@ alembic==1.19.1               # version-controlled schema migrations
 argon2-cffi==25.1.0           # Argon2id password hashing (app/core/security.py).
                               # Runtime, not dev: the app cannot import without it.
 
+# --- File upload & text extraction ---
+# Starlette parses multipart/form-data with this; without it, defining a route
+# that takes an UploadFile raises at import time rather than at request time.
+python-multipart==0.0.32
+# Pure-Python parsers, deliberately: each one avoids a native dependency that
+# would have to be installed separately on every developer machine and in every
+# container image.
+pypdf==6.16.2                 # PDF text extraction
+python-docx==1.2.0            # .docx paragraphs and tables
+openpyxl==3.1.5               # .xlsx cell values (read_only mode)
+# Validates that an uploaded image really decodes as one, rather than trusting
+# a file extension or a client-supplied content type.
+pillow==12.3.0
+
+# NOTE: no python-magic. It needs the native libmagic library, which is awkward
+# on Windows. NEXORA accepts a small, fixed set of formats, so their magic
+# bytes are checked directly in app/services/upload.py -- explicit, dependency
+# free, and readable.
+
 # --- AI providers ---
 # Imported only by app/ai/providers/anthropic_provider.py. The gateway imports
 # it lazily, so the offline echo provider runs without it.

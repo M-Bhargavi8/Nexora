@@ -49,11 +49,17 @@ export default function ChatPage() {
               NEXORA
             </span>
             <span className="rounded border border-ink-700 bg-ink-850 px-1.5 py-0.5 text-[10px] font-medium text-mist-500">
-              Phase&nbsp;4
+              Phase&nbsp;5
             </span>
           </div>
 
           <div className="flex items-center gap-3">
+            <Link
+              to="/files"
+              className="text-xs text-mist-500 underline-offset-4 hover:text-mist-300 hover:underline"
+            >
+              Files
+            </Link>
             <Link
               to="/status"
               className="text-xs text-mist-500 underline-offset-4 hover:text-mist-300 hover:underline"

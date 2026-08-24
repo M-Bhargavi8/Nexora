@@ -38,6 +38,12 @@ pnpm-debug.log*
 postgres-data/
 pgdata/
 
+# ---- Uploaded files ----
+# Everything a user uploads lands here. It is their private data, it is
+# unbounded in size, and it is content this repository did not author -- none
+# of which belongs in version control. The directory is created at runtime.
+backend/var/
+
 # ---- File storage (uploaded documents, generated artifacts) ----
 uploads/
 storage/
