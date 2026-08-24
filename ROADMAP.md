@@ -197,9 +197,77 @@ reported "No new upgrade operations detected", confirming no migration is due.
 - Still only the offline `echo` provider. Nothing here proves a real model
   provider works.
 
-## Phase 5 — File Upload ⚪
+## Phase 5 — File Upload ✅
 TXT, PDF, DOCX first; then CSV, XLSX, images. Validation, storage, size
 limits, MIME checks.
+
+**Delivered and verified (2026-08-24):**
+- `POST /files` accepts multipart uploads; `GET /files` lists them (paginated),
+  `GET /files/{id}` returns metadata plus extracted text, `/download` serves
+  the original bytes, `DELETE` removes row *and* bytes
+- Text extraction for **TXT, MD, CSV, PDF, DOCX, XLSX**. DOCX reads tables as
+  well as paragraphs — in real documents the tables carry the facts. XLSX reads
+  cells across every sheet with formulas resolved to values
+- Images (PNG/JPEG/GIF/WEBP) are validated and stored but not read, and say so
+  rather than returning a silent empty result. Reading them needs a vision
+  model, which is a later phase
+- **The user's filename never becomes a path.** It is stored as a display label
+  only; the path is built from a `storage_key` this application generates (a
+  bare UUID hex, no extension). That makes traversal structurally impossible
+  rather than something a validator must keep catching
+- **Content decides the type, not the extension.** Magic bytes are checked
+  first, then the extension must agree — in *both* directions
+- Size limit is enforced **while streaming**, never from `Content-Length`,
+  which a client can understate or omit
+- Extraction is bounded by characters and PDF pages (zip bombs, CPU exhaustion)
+  and runs in a worker thread so a large parse cannot stall the event loop or
+  the chat streams
+- Downloads are served `application/octet-stream` + `Content-Disposition:
+  attachment` + `nosniff`, so uploaded content cannot execute on our origin
+- A file that is accepted but unparseable is **kept** and marked, not deleted;
+  error text is written for the user and never copied from an exception
+- No `python-magic`: it needs native libmagic. The accepted set is small and
+  fixed, so signatures are checked directly — one dependency fewer
+- **384 backend tests, 147 frontend tests**, all passing
+
+**Verified against the running stack with real files**, not only in tests:
+uploaded a genuine 2-page PDF, DOCX with a table, multi-sheet XLSX, CSV, UTF-8
+TXT and PNG —
+
+- every format extracted correctly; an em dash and an emoji survived chunked
+  reads intact; the DOCX table came through as `EMEA | 421000`
+- HTML wearing a `.png` name → **400**, rejected on its contents
+- a 25MB upload → **400**, and nothing written to disk
+- filename `../../../etc/passwd.txt` → stored as label `passwd.txt`; on disk
+  every file is a flat 32-hex name directly under the upload root
+- download headers confirmed: `octet-stream`, `attachment`, `nosniff`
+- a second account got **404** on read, download *and* delete of another user's
+  file, and the bytes stayed intact
+- owner delete → 204, row gone, **bytes gone from disk**
+- **13 rows, 13 files on disk** — rejected uploads left no orphans
+- in the UI: `.exe` blocked client-side, HTML-as-PNG blocked server-side, text
+  preview rendered as plain text, upload progress and status badges correct
+
+Migration `0003_files` upgrades, passes `alembic check`, and downgrades cleanly
+against a throwaway database. Test accounts and files removed afterwards.
+
+**Known limitations, stated deliberately:**
+- **Deleting a user orphans their uploaded bytes.** The FK cascade removes the
+  rows, but disk has no foreign keys, and once the rows are gone nothing knows
+  which files to unlink. There is no account-deletion feature yet; when one is
+  built it must unlink storage *first*. Recorded on the model too.
+- Extraction happens inside the request, so the user waits for it and a slow
+  parse holds a connection. The caps make this acceptable; a job queue is the
+  real answer once uploads get large or frequent.
+- Scanned PDFs yield nothing — there is no OCR.
+- Files are not yet usable from chat. Attaching them is Phase 6 (RAG), which
+  chunks and embeds `extracted_text` rather than pasting whole documents in.
+- Storage is a local directory, so this does not survive a container rebuild
+  and does not work across multiple machines. The interface is narrow (write,
+  open, delete by key) precisely so object storage can replace it later.
+- No virus scanning. NEXORA never executes an upload, and downloads are forced
+  as attachments, but a file that is malicious *to the person who downloads it*
+  is not something this phase detects.
 
 ## Phase 6 — RAG ⚪
 Chunking, embeddings, pgvector, retrieval, contextual answering, source
