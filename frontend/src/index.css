@@ -20,10 +20,23 @@
   --color-ink-700: #212636;
   --color-ink-600: #2f3549;
 
-  /* Text */
+  /*
+   * Text.
+   *
+   * The full scale is declared even though the design leans on 100/300/500,
+   * because Tailwind v4 generates a utility *only* for a token that exists
+   * here. A class like `text-mist-400` written against an undeclared token is
+   * not an error anywhere -- it simply produces no rule, and the element
+   * quietly inherits its parent's colour. That failure is invisible in review
+   * and easy to miss on screen, so the intermediate steps are defined rather
+   * than left as traps.
+   */
   --color-mist-100: #eef1f7;
+  --color-mist-200: #d5dae5;
   --color-mist-300: #b6bdcd;
+  --color-mist-400: #98a1b4;
   --color-mist-500: #7c8499;
+  --color-mist-600: #5d6478;
 
   /* Brand -- teal, used sparingly for emphasis and identity */
   --color-brand-300: #6ff0e0;
