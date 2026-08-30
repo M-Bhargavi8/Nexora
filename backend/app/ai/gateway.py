@@ -54,6 +54,16 @@ def get_provider() -> ModelProvider:
             max_tokens=settings.ai_max_tokens,
         )
 
+    if provider_name == "gemini":
+        from app.ai.providers.gemini_provider import GeminiProvider
+
+        logger.info("Model provider: gemini (%s)", settings.ai_model)
+        return GeminiProvider(
+            api_key=settings.gemini_api_key or "",
+            model=settings.ai_model,
+            max_tokens=settings.ai_max_tokens,
+        )
+
     # Unreachable while `ai_provider` is a Literal -- Settings rejects anything
     # else before the application starts. Kept so that adding a name to the
     # Literal without adding a branch here fails loudly instead of silently

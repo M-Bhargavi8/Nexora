@@ -49,6 +49,12 @@ pillow==12.3.0
 # free, and readable.
 
 # --- AI providers ---
-# Imported only by app/ai/providers/anthropic_provider.py. The gateway imports
-# it lazily, so the offline echo provider runs without it.
+# Each is imported only by its own adapter in app/ai/providers/, and the
+# gateway imports them lazily inside the branch that needs them -- so the
+# offline echo provider runs without either package being importable.
 anthropic==1.0.0
+# Google's official Gen AI SDK (the successor to google-generativeai).
+# NOTE: this pins websockets to <17, which uvicorn[standard] also depends on.
+# Verified compatible -- uvicorn's websockets implementation still imports and
+# NEXORA uses SSE rather than websockets anyway.
+google-genai==2.20.0

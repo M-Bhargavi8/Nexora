@@ -138,6 +138,52 @@ class TestGatewaySelection:
         assert isinstance(provider, AnthropicProvider)
         assert provider.name == "anthropic"
 
+    def test_returns_the_gemini_provider_when_configured(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from app.ai.providers.gemini_provider import GeminiProvider
+
+        monkeypatch.setattr(
+            "app.ai.gateway.get_settings",
+            lambda: build_settings(
+                ai_provider="gemini",
+                gemini_api_key="not-a-real-key",
+                ai_model="gemini-3.7-flash",
+            ),
+        )
+
+        provider = get_provider()
+
+        assert isinstance(provider, GeminiProvider)
+        assert provider.name == "gemini"
+
+    def test_switching_providers_needs_no_change_above_the_gateway(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The point of the whole abstraction: three different vendors, one
+        interface, and callers that never learn which answered."""
+        from app.ai.base import ModelProvider
+
+        configurations = [
+            {"ai_provider": "echo"},
+            {"ai_provider": "anthropic", "anthropic_api_key": "sk-not-a-real-key"},
+            {
+                "ai_provider": "gemini",
+                "gemini_api_key": "not-a-real-key",
+                "ai_model": "gemini-3.7-flash",
+            },
+        ]
+
+        for configuration in configurations:
+            get_provider.cache_clear()
+            monkeypatch.setattr(
+                "app.ai.gateway.get_settings",
+                lambda c=configuration: build_settings(**c),
+            )
+            provider = get_provider()
+            assert isinstance(provider, ModelProvider)
+            assert hasattr(provider, "stream")
+
     def test_builds_the_provider_only_once(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

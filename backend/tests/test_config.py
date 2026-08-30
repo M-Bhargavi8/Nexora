@@ -32,6 +32,7 @@ NEXORA_ENV_VARS = (
     "CHAT_RATE_LIMIT_WINDOW_SECONDS",
     "AI_PROVIDER",
     "ANTHROPIC_API_KEY",
+    "GEMINI_API_KEY",
     "AI_MODEL",
     "AI_MAX_TOKENS",
     "AI_ECHO_CHUNK_DELAY_SECONDS",
@@ -228,6 +229,60 @@ class TestModelProviderConfig:
         )
 
         assert settings.ai_provider == "anthropic"
+
+    def test_gemini_without_an_api_key_refuses_to_start(self) -> None:
+        with pytest.raises(ValidationError) as exc_info:
+            build_settings(
+                ai_provider="gemini",
+                gemini_api_key=None,
+                ai_model="gemini-3.7-flash",
+            )
+
+        assert "GEMINI_API_KEY" in str(exc_info.value)
+
+    def test_gemini_with_an_api_key_is_accepted(self) -> None:
+        settings = build_settings(
+            ai_provider="gemini",
+            gemini_api_key="not-a-real-key",
+            ai_model="gemini-3.7-flash",
+        )
+
+        assert settings.ai_provider == "gemini"
+
+    def test_gemini_with_a_claude_model_refuses_to_start(self) -> None:
+        """`ai_model` is shared across providers and defaults to a Claude id.
+        Switching the provider and forgetting it would send "claude-opus-5" to
+        Google and get back a confusing 404 from a service that has never
+        heard of it."""
+        with pytest.raises(ValidationError) as exc_info:
+            build_settings(
+                ai_provider="gemini",
+                gemini_api_key="not-a-real-key",
+                ai_model="claude-opus-5",
+            )
+
+        assert "AI_MODEL" in str(exc_info.value)
+
+    def test_anthropic_with_a_gemini_model_refuses_to_start(self) -> None:
+        with pytest.raises(ValidationError) as exc_info:
+            build_settings(
+                ai_provider="anthropic",
+                anthropic_api_key="sk-not-a-real-key",
+                ai_model="gemini-3.7-flash",
+            )
+
+        assert "AI_MODEL" in str(exc_info.value)
+
+    def test_an_unrecognised_model_name_is_allowed(self) -> None:
+        """A prefix check, not a catalogue. Model names change too often to
+        hard-code a list that would reject something released next month."""
+        settings = build_settings(
+            ai_provider="gemini",
+            gemini_api_key="not-a-real-key",
+            ai_model="gemini-4-something-unreleased",
+        )
+
+        assert settings.ai_model == "gemini-4-something-unreleased"
 
     def test_the_fake_provider_is_refused_in_production(self) -> None:
         """SECURITY: the echo provider returns canned text. Shipping it would

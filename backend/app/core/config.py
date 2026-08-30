@@ -105,11 +105,20 @@ class Settings(BaseSettings):
     # model credentials, which keeps Phases 1-2 runnable and lets frontend
     # work happen without spending money. A validator below refuses "echo" in
     # production, so the safe default cannot silently ship.
-    ai_provider: Literal["anthropic", "echo"] = "echo"
+    ai_provider: Literal["anthropic", "gemini", "echo"] = "echo"
     # SECURITY: read from the environment, never committed, and never sent to
-    # the browser. Every model call is made server-side precisely so this
-    # value stays on the server.
+    # the browser. Every model call is made server-side precisely so these
+    # values stay on the server.
     anthropic_api_key: str | None = None
+    gemini_api_key: str | None = None
+    # The model id, shared across providers.
+    #
+    # Sharing one field keeps the config small, but it creates a trap: the
+    # default is a Claude id, so switching AI_PROVIDER without also setting
+    # AI_MODEL sends "claude-opus-5" to Google and gets back a confusing 404
+    # from a provider that has never heard of it. The validator below refuses
+    # to start on that mismatch rather than letting it surface as a runtime
+    # error in someone's face.
     ai_model: str = "claude-opus-5"
     # Caps the reply length, which caps the cost of any single request. An
     # unbounded max_tokens is a way for one user to spend a lot of money.
@@ -210,6 +219,33 @@ class Settings(BaseSettings):
             raise ValueError(
                 "AI_PROVIDER=anthropic requires ANTHROPIC_API_KEY to be set."
             )
+
+        if self.ai_provider == "gemini" and not self.gemini_api_key:
+            raise ValueError(
+                "AI_PROVIDER=gemini requires GEMINI_API_KEY to be set."
+            )
+
+        # Catch a model id that plainly belongs to a different provider.
+        #
+        # This is a prefix check, not a catalogue: model names change far too
+        # often to hard-code a list that would then reject a model released
+        # next month. It only refuses ids that are unmistakably another
+        # vendor's, which is the actual mistake being guarded against --
+        # switching AI_PROVIDER and forgetting AI_MODEL.
+        _EXPECTED_PREFIX = {"anthropic": "claude", "gemini": "gemini"}
+        expected = _EXPECTED_PREFIX.get(self.ai_provider)
+        if expected is not None:
+            wrong = [
+                prefix
+                for provider, prefix in _EXPECTED_PREFIX.items()
+                if provider != self.ai_provider
+            ]
+            if any(self.ai_model.startswith(prefix) for prefix in wrong):
+                raise ValueError(
+                    f"AI_PROVIDER={self.ai_provider} was given AI_MODEL="
+                    f"{self.ai_model!r}, which belongs to a different provider. "
+                    f"Set AI_MODEL to a {expected}-* model id."
+                )
 
         if self.app_env == "production" and self.ai_provider == "echo":
             raise ValueError(
