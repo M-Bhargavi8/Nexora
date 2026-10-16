@@ -1,6 +1,6 @@
 /** Drag-and-drop target that also works as an ordinary file picker. */
 
-import { useState, type RefObject } from 'react'
+import { useRef, useState, type RefObject } from 'react'
 import { ACCEPTED_EXTENSIONS, MAX_UPLOAD_BYTES } from '../lib/files'
 
 interface FileDropZoneProps {
@@ -12,29 +12,27 @@ export function FileDropZone({ onFiles, inputRef }: FileDropZoneProps) {
   const [isDragging, setIsDragging] = useState(false)
   // Drag events fire on every child element, so a plain boolean flickers as
   // the pointer crosses the inner text. Counting enter/leave pairs is what
-  // makes the highlight stable.
-  const [depth, setDepth] = useState(0)
+  // makes the highlight stable. A ref, not state: the count is never
+  // rendered, so changing it shouldn't trigger a re-render.
+  const depth = useRef(0)
 
   function handleDragEnter(event: React.DragEvent) {
     event.preventDefault()
-    setDepth((current) => current + 1)
+    depth.current += 1
     setIsDragging(true)
   }
 
   function handleDragLeave(event: React.DragEvent) {
     event.preventDefault()
-    setDepth((current) => {
-      const next = current - 1
-      if (next <= 0) setIsDragging(false)
-      return Math.max(0, next)
-    })
+    depth.current = Math.max(0, depth.current - 1)
+    if (depth.current === 0) setIsDragging(false)
   }
 
   function handleDrop(event: React.DragEvent) {
     // Without preventDefault the browser navigates away to display the
     // dropped file, discarding the page.
     event.preventDefault()
-    setDepth(0)
+    depth.current = 0
     setIsDragging(false)
     if (event.dataTransfer.files.length > 0) onFiles(event.dataTransfer.files)
   }
