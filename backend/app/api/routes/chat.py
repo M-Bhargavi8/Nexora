@@ -31,6 +31,7 @@ from app.ai.base import (
     ModelRateLimitError,
     TextDelta,
     Usage,
+    with_idle_timeout,
 )
 from app.ai.context import BASE_SYSTEM_PROMPT, build_system_prompt, citations_payload
 from app.ai.gateway import get_provider
@@ -45,6 +46,7 @@ from app.models.message import MessageRole
 from app.schemas.chat import (
     ChatRequest,
     ConversationDetailResponse,
+    ConversationFileResponse,
     ConversationPage,
     ConversationResponse,
     EditMessageRequest,
@@ -52,9 +54,12 @@ from app.schemas.chat import (
     RegenerateRequest,
     RenameConversationRequest,
 )
-from app.services.retrieval import RetrievedChunk, search_chunks
+from app.services.retrieval import RetrievedChunk, embed_query, search_chunks
 from app.services.chat import (
     append_message,
+    attach_files,
+    conversation_files,
+    detach_file,
     create_conversation,
     delete_conversation,
     derive_title,
@@ -109,9 +114,14 @@ async def _retrieve_context(
     *,
     query: str,
     user_id: uuid.UUID,
+    conversation_id: uuid.UUID,
     file_ids: list[uuid.UUID] | None,
 ) -> list[RetrievedChunk]:
     """Find passages from this user's documents that bear on their question.
+
+    Files attached to the conversation are searched first and always
+    contribute their best passages; the rest of the user's library follows
+    at the normal similarity floor.
 
     Failure is deliberately not fatal. If retrieval breaks -- the embedding
     provider is down, the vector index is rebuilding -- the user gets an answer
@@ -120,9 +130,46 @@ async def _retrieve_context(
     was not read.
     """
     try:
-        return await search_chunks(
-            db, query=query, user_id=user_id, file_ids=file_ids
+        if file_ids:
+            # An explicit scope from the client wins over everything else.
+            return await search_chunks(
+                db, query=query, user_id=user_id, file_ids=file_ids
+            )
+
+        attached = [
+            file.id
+            for file in await conversation_files(
+                db, conversation_id=conversation_id, user_id=user_id
+            )
+        ]
+        # Embedded once, shared by both searches below.
+        vector = await embed_query(query) if query.strip() else None
+        general = await search_chunks(
+            db, query=query, user_id=user_id, query_vector=vector
         )
+        if not attached:
+            return general
+
+        # Files added to this chat come first, and without the similarity
+        # floor: "what is my email?" shares too few words with a resume to
+        # clear it, but the person plainly means the file they put here.
+        # Ranked by similarity within those files, capped separately.
+        pinned = await search_chunks(
+            db,
+            query=query,
+            user_id=user_id,
+            file_ids=attached,
+            limit=get_settings().conversation_file_top_k,
+            min_similarity=-1.0,
+            query_vector=vector,
+        )
+        seen = {" ".join(chunk.content.split()) for chunk in pinned}
+        rest = [
+            chunk
+            for chunk in general
+            if " ".join(chunk.content.split()) not in seen
+        ]
+        return [*pinned, *rest]
     except Exception:  # noqa: BLE001 - retrieval must not break chat
         logger.exception(
             "Retrieval failed; answering without documents",
@@ -245,7 +292,10 @@ async def _stream_reply(
         yield _sse({"type": "sources", "sources": citations_payload(retrieved)})
 
     try:
-        async for event in provider.stream(history, system=system_prompt):
+        async for event in with_idle_timeout(
+            provider.stream(history, system=system_prompt),
+            seconds=get_settings().ai_stream_idle_timeout_seconds,
+        ):
             if isinstance(event, TextDelta):
                 parts.append(event.text)
                 yield _sse({"type": "delta", "text": event.text})
@@ -328,6 +378,15 @@ async def send_message(
         if conversation is None:
             raise _CONVERSATION_NOT_FOUND
 
+    if payload.attach_file_ids:
+        # Before the message, so this very question already sees them.
+        await attach_files(
+            db,
+            conversation_id=conversation.id,
+            user_id=user.id,
+            file_ids=payload.attach_file_ids,
+        )
+
     user_message = await append_message(
         db,
         conversation_id=conversation.id,
@@ -342,7 +401,11 @@ async def send_message(
     # Retrieval also happens here, for the same reason: the generator below
     # runs after this handler returns, by which point `db` is gone.
     retrieved = await _retrieve_context(
-        db, query=payload.content, user_id=user.id, file_ids=payload.file_ids
+        db,
+        query=payload.content,
+        user_id=user.id,
+        conversation_id=conversation.id,
+        file_ids=payload.file_ids,
     )
 
     return StreamingResponse(
@@ -416,7 +479,11 @@ async def regenerate(
     # since, and a regenerated answer citing a file the user has removed would
     # be worse than a slightly slower one.
     retrieved = await _retrieve_context(
-        db, query=question.content, user_id=user.id, file_ids=None
+        db,
+        query=question.content,
+        user_id=user.id,
+        conversation_id=conversation.id,
+        file_ids=None,
     )
 
     return StreamingResponse(
@@ -493,7 +560,11 @@ async def edit_message(
     # that the question changed, so passages found for the old text would
     # answer a question no longer being asked.
     retrieved = await _retrieve_context(
-        db, query=payload.content, user_id=user.id, file_ids=None
+        db,
+        query=payload.content,
+        user_id=user.id,
+        conversation_id=conversation.id,
+        file_ids=None,
     )
 
     return StreamingResponse(
@@ -615,4 +686,37 @@ async def get_conversation_detail(
         created_at=conversation.created_at,
         updated_at=conversation.updated_at,
         messages=[MessageResponse.model_validate(m) for m in conversation.messages],
+        files=[
+            ConversationFileResponse(
+                id=file.id,
+                filename=file.filename,
+                status=file.status.value,
+                has_text=bool(file.extracted_text),
+            )
+            for file in await conversation_files(
+                db, conversation_id=conversation.id, user_id=user.id
+            )
+        ],
     )
+
+
+@router.delete(
+    "/conversations/{conversation_id}/files/{file_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Remove a file from a conversation (the file itself is kept)",
+    responses={404: {"description": "No such conversation, or file not in it"}},
+)
+async def remove_conversation_file(
+    conversation_id: uuid.UUID, file_id: uuid.UUID, db: DbSession, user: CurrentUser
+) -> Response:
+    conversation = await get_conversation(
+        db, conversation_id=conversation_id, user_id=user.id
+    )
+    if conversation is None:
+        raise _CONVERSATION_NOT_FOUND
+    if not await detach_file(db, conversation_id=conversation.id, file_id=file_id):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="File not in this conversation",
+        )
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

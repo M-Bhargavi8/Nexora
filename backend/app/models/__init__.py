@@ -8,6 +8,7 @@ table should not exist and helpfully generate a migration that **drops** it.
 
 from app.models.chunk import FileChunk
 from app.models.conversation import Conversation
+from app.models.conversation_file import ConversationFile
 from app.models.file import File, FileStatus
 from app.models.message import Message, MessageRole
 from app.models.session import UserSession
@@ -15,6 +16,7 @@ from app.models.user import User
 
 __all__ = [
     "Conversation",
+    "ConversationFile",
     "File",
     "FileChunk",
     "FileStatus",

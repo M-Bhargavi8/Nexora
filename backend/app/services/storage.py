@@ -13,9 +13,11 @@ three functions rather than a change spread through the request handlers.
 
 from __future__ import annotations
 
+import hashlib
+
 import uuid
 from pathlib import Path
-from typing import BinaryIO
+from typing import BinaryIO, NamedTuple
 
 from app.core.config import get_settings
 from app.core.logging import get_logger
@@ -70,11 +72,23 @@ def path_for(storage_key: str) -> Path:
     return _upload_root() / storage_key
 
 
-async def save_upload(stream: BinaryIO, *, max_bytes: int) -> tuple[str, int, bytes]:
+class SavedUpload(NamedTuple):
+    """What `save_upload` wrote. A NamedTuple so it still unpacks."""
+
+    storage_key: str
+    size: int
+    #: The first bytes, which the caller sniffs to identify the format.
+    head: bytes
+    #: SHA-256 of the whole file, hex. Computed while streaming, so spotting
+    #: a repeat upload costs no second read of the file.
+    sha256: str
+
+
+async def save_upload(stream: BinaryIO, *, max_bytes: int) -> SavedUpload:
     """Stream an upload to disk, stopping if it exceeds `max_bytes`.
 
-    Returns the storage key, the number of bytes written, and the first chunk
-    (which the caller sniffs to identify the format).
+    Returns the storage key, the number of bytes written, the first chunk
+    (which the caller sniffs to identify the format), and a content hash.
 
     **Why the limit is enforced here rather than from `Content-Length`.** That
     header is supplied by the client. It can understate the real size, be
@@ -91,6 +105,7 @@ async def save_upload(stream: BinaryIO, *, max_bytes: int) -> tuple[str, int, by
     destination = path_for(storage_key)
     written = 0
     head = b""
+    digest = hashlib.sha256()
 
     try:
         with destination.open("wb") as sink:
@@ -107,6 +122,7 @@ async def save_upload(stream: BinaryIO, *, max_bytes: int) -> tuple[str, int, by
                     raise UploadTooLarge(max_bytes)
 
                 sink.write(chunk)
+                digest.update(chunk)
     except Exception:
         # Includes UploadTooLarge. Whatever went wrong, the bytes already
         # written are not a usable file and must not be left behind.
@@ -117,7 +133,7 @@ async def save_upload(stream: BinaryIO, *, max_bytes: int) -> tuple[str, int, by
         destination.unlink(missing_ok=True)
         raise ValueError("The uploaded file is empty.")
 
-    return storage_key, written, head
+    return SavedUpload(storage_key, written, head, digest.hexdigest())
 
 
 def delete_stored_file(storage_key: str) -> None:

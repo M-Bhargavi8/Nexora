@@ -21,6 +21,7 @@ embeddings, which is the normal arrangement rather than an exotic one.
 
 from __future__ import annotations
 
+import asyncio
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
@@ -200,4 +201,55 @@ class EmbeddingProvider(ABC):
 
         Raises a `ModelProviderError` subclass on failure.
         """
+        raise NotImplementedError
+
+
+async def with_idle_timeout(
+    events: AsyncIterator[StreamEvent], *, seconds: float
+) -> AsyncIterator[StreamEvent]:
+    """Re-yield `events`, failing if the provider goes quiet for `seconds`.
+
+    An *idle* timeout rather than a total one: a long answer that keeps
+    arriving is fine however long it takes, while a connection that has
+    stopped producing anything is not. Without this a stalled provider holds
+    the reply -- and the person watching it -- open indefinitely.
+
+    Applies to every provider, so no adapter has to remember to implement it.
+    """
+    iterator = aiter(events)
+    try:
+        while True:
+            try:
+                event = await asyncio.wait_for(anext(iterator), timeout=seconds)
+            except StopAsyncIteration:
+                return
+            except TimeoutError as exc:
+                raise ModelUnavailableError("Model provider stopped responding") from exc
+            yield event
+    finally:
+        close = getattr(iterator, "aclose", None)
+        if close is not None:
+            await close()
+
+
+class ImageReader(ABC):
+    """Turns an image into text: what it says, and what it shows.
+
+    Its own interface for the same reason embeddings have one -- it is bought
+    and configured separately, and most chat providers do not need it. The
+    text it returns is stored as the file's extracted text, so an image then
+    flows through chunking, embedding and retrieval like any document.
+
+    What it returns is **untrusted content**, exactly like a PDF's text: an
+    image can contain the words "ignore your instructions". It is handled by
+    the same delimited reference block as every other document.
+    """
+
+    #: Short identifier used in logs.
+    name: str
+    model: str
+
+    @abstractmethod
+    async def read_image(self, data: bytes, *, mime_type: str) -> str:
+        """Transcribe and describe one image. Raises `ModelProviderError`."""
         raise NotImplementedError

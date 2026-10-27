@@ -34,6 +34,8 @@ export interface UseFiles {
   isLoading: boolean
   hasMore: boolean
   error: string | null
+  /** Informational, not an error: e.g. an upload matched an existing file. */
+  notice: string | null
   upload: (files: FileList | File[]) => Promise<void>
   remove: (id: string) => Promise<void>
   loadMore: () => Promise<void>
@@ -53,8 +55,10 @@ function localId(): string {
  * This is a courtesy, not a control. The server repeats every one of these
  * checks against the actual bytes, because anything enforced only in the
  * browser is enforced nowhere -- a client is trivially bypassed.
+ *
+ * Exported so the chat composer's upload button applies the same rules.
  */
-function localRejectionReason(file: File): string | null {
+export function localRejectionReason(file: File): string | null {
   if (file.size === 0) return 'This file is empty.'
   if (file.size > MAX_UPLOAD_BYTES) {
     return `This file is larger than ${MAX_UPLOAD_BYTES / (1024 * 1024)}MB.`
@@ -74,6 +78,7 @@ export function useFiles(): UseFiles {
   const [isLoading, setIsLoading] = useState(false)
   const [hasMore, setHasMore] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
 
   const requestRef = useRef(0)
 
@@ -111,6 +116,7 @@ export function useFiles(): UseFiles {
     const chosen = Array.from(incoming)
     if (chosen.length === 0) return
     setError(null)
+    setNotice(null)
 
     // Sequential rather than parallel. Ten files at once would race the
     // server's upload rate limit and, more importantly, saturate the
@@ -137,9 +143,15 @@ export function useFiles(): UseFiles {
               ),
             ),
         })
-        // Newest first, matching the server's ordering, so the list does not
-        // reorder itself on the next refresh.
-        setFiles((current) => [stored, ...current])
+        if (stored.reused) {
+          // The server kept the existing copy rather than storing another,
+          // so there is no new row -- adding one would list the file twice.
+          setNotice(`${file.name}: already uploaded as ${stored.filename}, so no copy was made.`)
+        } else {
+          // Newest first, matching the server's ordering, so the list does
+          // not reorder itself on the next refresh.
+          setFiles((current) => [stored, ...current])
+        }
       } catch (caught) {
         setError(
           `${file.name}: ${
@@ -161,7 +173,10 @@ export function useFiles(): UseFiles {
     }
   }, [])
 
-  const dismissError = useCallback(() => setError(null), [])
+  const dismissError = useCallback(() => {
+    setError(null)
+    setNotice(null)
+  }, [])
 
   return {
     files,
@@ -169,6 +184,7 @@ export function useFiles(): UseFiles {
     isLoading,
     hasMore,
     error,
+    notice,
     upload,
     remove,
     loadMore,

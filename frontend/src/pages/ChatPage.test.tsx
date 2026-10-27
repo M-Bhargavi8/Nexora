@@ -13,6 +13,7 @@ import { MemoryRouter } from 'react-router'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import * as api from '../lib/api'
 import * as chatApi from '../lib/chat'
+import * as filesApi from '../lib/files'
 import type { ChatEvent, ConversationDto } from '../lib/chat'
 import { AuthProvider } from '../contexts/AuthProvider'
 import ChatPage from './ChatPage'
@@ -36,7 +37,32 @@ vi.mock('../lib/chat', () => ({
   getConversation: vi.fn(),
   renameConversation: vi.fn(),
   deleteConversation: vi.fn(),
+  removeConversationFile: vi.fn(),
 }))
+
+vi.mock('../lib/files', async (importOriginal) => {
+  const actual = await importOriginal<typeof filesApi>()
+  return { ...actual, uploadFile: vi.fn() }
+})
+
+/** What the server returns for a stored file, with overrides. */
+function storedFile(
+  overrides: Partial<filesApi.StoredFileDetailDto> = {},
+): filesApi.StoredFileDetailDto {
+  return {
+    id: 'f1',
+    filename: 'notes.pdf',
+    content_type: 'application/pdf',
+    size_bytes: 1024,
+    status: 'ready',
+    page_count: 1,
+    error: null,
+    created_at: '',
+    has_text: true,
+    extracted_text: 'text',
+    ...overrides,
+  }
+}
 
 const ADA = {
   id: '11111111-1111-1111-1111-111111111111',
@@ -804,5 +830,215 @@ describe('showing sources', () => {
 
     // Scrolling back must still show which answer was grounded in a document.
     expect(screen.getAllByText(/Answered using/)).toHaveLength(1)
+  })
+})
+
+describe('uploading from the chat', () => {
+  function pdf(name = 'notes.pdf') {
+    return new File(['%PDF-1.7'], name, { type: 'application/pdf' })
+  }
+
+  it('offers an upload button beside the message box', async () => {
+    renderChatPage()
+
+    expect(await screen.findByRole('button', { name: 'Upload a file' })).toBeInTheDocument()
+  })
+
+  it('uploads the chosen file and says when it can be asked about', async () => {
+    vi.mocked(filesApi.uploadFile).mockImplementation(async (_file, options) => {
+      options?.onProgress?.(0.5)
+      return storedFile()
+    })
+    renderChatPage()
+    await screen.findByLabelText('Message')
+
+    await userEvent.upload(screen.getByTestId('composer-file-input'), pdf())
+
+    expect(await screen.findByText(/Ready — added with your next message/)).toBeInTheDocument()
+    expect(screen.getByText('notes.pdf')).toBeInTheDocument()
+    expect(filesApi.uploadFile).toHaveBeenCalledTimes(1)
+  })
+
+  it('says when an upload matched a file already stored', async () => {
+    vi.mocked(filesApi.uploadFile).mockResolvedValue(storedFile({ reused: true }))
+    renderChatPage()
+    await screen.findByLabelText('Message')
+
+    await userEvent.upload(screen.getByTestId('composer-file-input'), pdf())
+
+    expect(await screen.findByText(/Already uploaded — using your existing copy/)).toBeInTheDocument()
+  })
+
+  it('says so when a stored file has no text to search', async () => {
+    vi.mocked(filesApi.uploadFile).mockResolvedValue(
+      storedFile({ filename: 'photo.png', status: 'unsupported', has_text: false }),
+    )
+    renderChatPage()
+    await screen.findByLabelText('Message')
+
+    await userEvent.upload(
+      screen.getByTestId('composer-file-input'),
+      new File(['x'], 'photo.png', { type: 'image/png' }),
+    )
+
+    expect(await screen.findByText(/no readable text/)).toBeInTheDocument()
+  })
+
+  it('shows the reason the server gave for refusing an upload', async () => {
+    vi.mocked(filesApi.uploadFile).mockRejectedValue(
+      new api.ApiError('This file is not really a PDF.', 400),
+    )
+    renderChatPage()
+    await screen.findByLabelText('Message')
+
+    await userEvent.upload(screen.getByTestId('composer-file-input'), pdf())
+
+    expect(await screen.findByText('This file is not really a PDF.')).toBeInTheDocument()
+  })
+
+  it('refuses an unsupported type without contacting the server', async () => {
+    renderChatPage()
+    await screen.findByLabelText('Message')
+
+    // applyAccept off: the picker filter is a convenience the user can switch
+    // off, so the check behind it must hold on its own.
+    const user = userEvent.setup({ applyAccept: false })
+    await user.upload(
+      screen.getByTestId('composer-file-input'),
+      new File(['MZ'], 'setup.exe', { type: 'application/octet-stream' }),
+    )
+
+    expect(await screen.findByText(/.exe files are not supported/)).toBeInTheDocument()
+    expect(filesApi.uploadFile).not.toHaveBeenCalled()
+  })
+
+  it('lets a finished upload be dismissed', async () => {
+    vi.mocked(filesApi.uploadFile).mockResolvedValue(storedFile())
+    renderChatPage()
+    await screen.findByLabelText('Message')
+
+    await userEvent.upload(screen.getByTestId('composer-file-input'), pdf())
+    await userEvent.click(await screen.findByRole('button', { name: 'Dismiss notes.pdf' }))
+
+    await waitFor(() => expect(screen.queryByText('notes.pdf')).not.toBeInTheDocument())
+  })
+})
+
+describe('files in a chat', () => {
+  function pdf(name = 'notes.pdf') {
+    return new File(['%PDF-1.7'], name, { type: 'application/pdf' })
+  }
+
+  it('sends an uploaded file with the next question and lists it as in this chat', async () => {
+    vi.mocked(filesApi.uploadFile).mockResolvedValue(storedFile({ id: 'f1', filename: 'resume.pdf' }))
+    renderChatPage()
+    const composer = await screen.findByLabelText('Message')
+
+    await userEvent.upload(screen.getByTestId('composer-file-input'), pdf('resume.pdf'))
+    await screen.findByText(/Ready — added with your next message/)
+    await userEvent.type(composer, 'what is my email?{Enter}')
+
+    await waitFor(() =>
+      expect(chatApi.streamChat).toHaveBeenCalledWith(
+        expect.objectContaining({ content: 'what is my email?', attachFileIds: ['f1'] }),
+      ),
+    )
+    const inChat = await screen.findByRole('list', { name: 'Files in this chat' })
+    expect(inChat).toHaveTextContent('resume.pdf')
+    // Moved out of the upload list, not shown twice.
+    expect(screen.queryByText(/Ready — added with your next message/)).not.toBeInTheDocument()
+  })
+
+  it('attaches a file only once', async () => {
+    vi.mocked(filesApi.uploadFile).mockResolvedValue(storedFile({ id: 'f1' }))
+    renderChatPage()
+    const composer = await screen.findByLabelText('Message')
+    await userEvent.upload(screen.getByTestId('composer-file-input'), pdf())
+    await screen.findByText(/Ready — added with your next message/)
+
+    await userEvent.type(composer, 'first{Enter}')
+    await screen.findAllByText('Hello there')
+    await userEvent.type(composer, 'second{Enter}')
+
+    await waitFor(() => expect(chatApi.streamChat).toHaveBeenCalledTimes(2))
+    expect(vi.mocked(chatApi.streamChat).mock.calls[1][0].attachFileIds).toEqual([])
+  })
+
+  it('holds Send until an upload has finished', async () => {
+    let finish: (value: filesApi.StoredFileDetailDto) => void = () => {}
+    vi.mocked(filesApi.uploadFile).mockImplementation(
+      () => new Promise((resolve) => { finish = resolve }),
+    )
+    renderChatPage()
+    const composer = await screen.findByLabelText('Message')
+    await userEvent.type(composer, 'about the file')
+
+    await userEvent.upload(screen.getByTestId('composer-file-input'), pdf())
+
+    expect(screen.getByRole('button', { name: 'Send' })).toBeDisabled()
+    finish(storedFile())
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Send' })).toBeEnabled())
+  })
+
+  it('shows the files of a conversation when it is opened', async () => {
+    vi.mocked(chatApi.listConversations).mockResolvedValue(page([conversation('c1', 'About my CV')]))
+    vi.mocked(chatApi.getConversation).mockResolvedValue({
+      id: 'c1',
+      title: 'About my CV',
+      created_at: '',
+      updated_at: '',
+      messages: [],
+      files: [{ id: 'f1', filename: 'resume.pdf', status: 'ready', has_text: true }],
+    })
+    renderChatPage()
+
+    await userEvent.click(await screen.findByRole('button', { name: 'About my CV' }))
+
+    expect(await screen.findByRole('list', { name: 'Files in this chat' })).toHaveTextContent(
+      'resume.pdf',
+    )
+  })
+
+  it('removes a file from the chat', async () => {
+    vi.mocked(chatApi.listConversations).mockResolvedValue(page([conversation('c1', 'About my CV')]))
+    vi.mocked(chatApi.getConversation).mockResolvedValue({
+      id: 'c1',
+      title: 'About my CV',
+      created_at: '',
+      updated_at: '',
+      messages: [],
+      files: [{ id: 'f1', filename: 'resume.pdf', status: 'ready', has_text: true }],
+    })
+    vi.mocked(chatApi.removeConversationFile).mockResolvedValue(undefined)
+    renderChatPage()
+    await userEvent.click(await screen.findByRole('button', { name: 'About my CV' }))
+
+    await userEvent.click(
+      await screen.findByRole('button', { name: 'Remove resume.pdf from this chat' }),
+    )
+
+    expect(chatApi.removeConversationFile).toHaveBeenCalledWith('c1', 'f1')
+    await waitFor(() =>
+      expect(screen.queryByRole('list', { name: 'Files in this chat' })).not.toBeInTheDocument(),
+    )
+  })
+
+  it('says when a file in the chat has no readable text', async () => {
+    vi.mocked(filesApi.uploadFile).mockResolvedValue(
+      storedFile({ id: 'img', filename: 'photo.png', status: 'unsupported', has_text: false }),
+    )
+    renderChatPage()
+    const composer = await screen.findByLabelText('Message')
+    await userEvent.upload(
+      screen.getByTestId('composer-file-input'),
+      new File(['x'], 'photo.png', { type: 'image/png' }),
+    )
+    await screen.findByText(/no readable text/)
+
+    await userEvent.type(composer, 'what is in it?{Enter}')
+
+    expect(await screen.findByRole('list', { name: 'Files in this chat' })).toHaveTextContent(
+      'no readable text',
+    )
   })
 })

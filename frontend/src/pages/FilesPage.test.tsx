@@ -166,6 +166,26 @@ describe('listing', () => {
 })
 
 describe('uploading', () => {
+  it('does not list a file twice when the upload matched an existing one', async () => {
+    const existing = storedFile({ id: 'f-existing', filename: 'report.pdf' })
+    vi.mocked(filesApi.listFiles).mockResolvedValue(page([existing]))
+    vi.mocked(filesApi.uploadFile).mockResolvedValue({
+      ...existing,
+      extracted_text: 'text',
+      reused: true,
+    })
+    renderFilesPage()
+    const input = await screen.findByLabelText('Choose files to upload')
+    await screen.findByText('report.pdf')
+
+    await userEvent.upload(input, makeFile('report copy.pdf'))
+
+    expect(
+      await screen.findByText(/already uploaded as report.pdf, so no copy was made/),
+    ).toBeInTheDocument()
+    expect(screen.getAllByText('report.pdf')).toHaveLength(1)
+  })
+
   it('sends the chosen file and shows it in the list', async () => {
     const uploaded: StoredFileDetailDto = {
       ...storedFile({ filename: 'essay.txt' }),

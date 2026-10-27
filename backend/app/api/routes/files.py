@@ -83,6 +83,9 @@ def _to_response(file: File) -> FileResponse:
         + ", ".join(sorted(ACCEPTED_EXTENSIONS))
     ),
     responses={
+        200: {
+            "description": "Identical to a file the user already has; that file is returned and nothing new is stored"
+        },
         400: {"description": "The file was rejected by validation"},
         429: {"description": "Too many uploads"},
     },
@@ -91,6 +94,7 @@ async def upload_file(
     db: DbSession,
     user: CurrentUser,
     file: Annotated[UploadFile, FileParam(description="The file to upload.")],
+    response: Response,
 ) -> FileDetailResponse:
     """Store an uploaded file and extract whatever text it contains."""
     if not upload_rate_limiter.allow(f"upload:{user.id}"):
@@ -102,7 +106,7 @@ async def upload_file(
         )
 
     try:
-        stored = await create_file(
+        stored, reused = await create_file(
             db,
             user_id=user.id,
             # Starlette buffers the upload in a SpooledTemporaryFile: small
@@ -122,9 +126,14 @@ async def upload_file(
             status_code=status.HTTP_400_BAD_REQUEST, detail=str(rejected)
         ) from rejected
 
+    if reused:
+        # 200 rather than 201: nothing was created.
+        response.status_code = status.HTTP_200_OK
+
     return FileDetailResponse(
         **_to_response(stored).model_dump(),
         extracted_text=stored.extracted_text,
+        reused=reused,
     )
 
 

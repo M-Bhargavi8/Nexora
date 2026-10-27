@@ -26,8 +26,18 @@ export interface ConversationDto {
   updated_at: string
 }
 
+/** A file added to a conversation. Mirrors `ConversationFileResponse`. */
+export interface ConversationFileDto {
+  id: string
+  filename: string
+  status: string
+  has_text: boolean
+}
+
 export interface ConversationDetailDto extends ConversationDto {
   messages: ChatMessageDto[]
+  /** Files this conversation answers from first. Absent from older servers. */
+  files?: ConversationFileDto[]
 }
 
 /** One page of the sidebar list. Mirrors `ConversationPage` on the backend. */
@@ -74,6 +84,8 @@ export type ChatEvent =
 interface StreamOptions {
   content: string
   conversationId?: string | null
+  /** Files to add to the conversation before this question is answered. */
+  attachFileIds?: string[]
   onEvent: (event: ChatEvent) => void
   /** Lets the caller abort generation. Wired to the Stop button. */
   signal?: AbortSignal
@@ -191,12 +203,17 @@ async function postStream(
 export function streamChat({
   content,
   conversationId,
+  attachFileIds,
   onEvent,
   signal,
 }: StreamOptions): Promise<void> {
   return postStream(
     '/chat',
-    { content, ...(conversationId ? { conversation_id: conversationId } : {}) },
+    {
+      content,
+      ...(conversationId ? { conversation_id: conversationId } : {}),
+      ...(attachFileIds && attachFileIds.length > 0 ? { attach_file_ids: attachFileIds } : {}),
+    },
     onEvent,
     signal,
   )
@@ -277,6 +294,16 @@ export async function renameConversation(
     body: { title },
   })
   return data
+}
+
+/** Take a file out of a conversation. The file stays in the library. */
+export async function removeConversationFile(
+  conversationId: string,
+  fileId: string,
+): Promise<void> {
+  await request<void>(`/chat/conversations/${conversationId}/files/${fileId}`, {
+    method: 'DELETE',
+  })
 }
 
 export async function deleteConversation(id: string): Promise<void> {

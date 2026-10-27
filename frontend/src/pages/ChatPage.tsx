@@ -6,17 +6,21 @@
 
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router'
+import { ChatFileList } from '../components/ChatFileList'
 import { Composer } from '../components/Composer'
 import { ConversationSidebar } from '../components/ConversationSidebar'
 import { MessageList } from '../components/MessageList'
+import { UploadStatusList } from '../components/UploadStatusList'
 import { useAuth } from '../hooks/useAuth'
 import { useChat } from '../hooks/useChat'
+import { useChatUploads } from '../hooks/useChatUploads'
 import { useConversations } from '../hooks/useConversations'
 
 export default function ChatPage() {
   const { user, logout } = useAuth()
   const chat = useChat()
   const conversations = useConversations()
+  const uploads = useChatUploads()
   const [isSigningOut, setIsSigningOut] = useState(false)
 
   // The list is ordered by most recent activity and titled from the first
@@ -117,10 +121,26 @@ export default function ChatPage() {
           </div>
         )}
 
+        <div className="px-4">
+          <ChatFileList files={chat.files} onRemove={(id) => void chat.removeFile(id)} />
+          <UploadStatusList
+            // Staged uploads already appear as files of this chat once sent;
+            // until then they show here with their upload state.
+            uploads={uploads.uploads}
+            onDismiss={uploads.dismiss}
+          />
+        </div>
+
         <Composer
-          onSend={(content) => void chat.send(content)}
+          onSend={(content) => {
+            const staged = uploads.staged
+            uploads.clear(staged.map((file) => file.id))
+            void chat.send(content, staged)
+          }}
           onStop={chat.stop}
           isStreaming={chat.isStreaming}
+          onUpload={(files) => void uploads.upload(files)}
+          isUploading={uploads.isUploading}
         />
       </div>
     </div>

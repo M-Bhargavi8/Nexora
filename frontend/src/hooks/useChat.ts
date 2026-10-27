@@ -13,6 +13,8 @@ import { ApiError } from '../lib/api'
 import {
   editMessage as editRequest,
   getConversation,
+  removeConversationFile,
+  type ConversationFileDto,
   regenerate as regenerateRequest,
   streamChat,
   type ChatEvent,
@@ -50,7 +52,12 @@ export interface UseChat {
   error: string | null
   /** Whether there is a completed answer that could be replaced. */
   canRegenerate: boolean
-  send: (content: string) => Promise<void>
+  /** Files this conversation answers from first. */
+  files: ConversationFileDto[]
+  /** Send a question, adding `attach` to the conversation first. */
+  send: (content: string, attach?: ConversationFileDto[]) => Promise<void>
+  /** Take a file out of this conversation (it stays in the library). */
+  removeFile: (fileId: string) => Promise<void>
   regenerate: () => Promise<void>
   /** Rewrite one of your own questions and answer it again. */
   edit: (messageId: string, content: string) => Promise<void>
@@ -81,6 +88,7 @@ export function useChat(): UseChat {
   const [conversationId, setConversationId] = useState<string | null>(null)
   const [isStreaming, setIsStreaming] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [files, setFiles] = useState<ConversationFileDto[]>([])
 
   // Held in a ref, not state: aborting must not depend on a re-render having
   // happened, and changing it should not cause one.
@@ -95,6 +103,7 @@ export function useChat(): UseChat {
     abortRef.current = null
     conversationIdRef.current = null
     setMessages([])
+    setFiles([])
     setConversationId(null)
     setError(null)
     setIsStreaming(false)
@@ -108,6 +117,7 @@ export function useChat(): UseChat {
       conversationIdRef.current = conversation.id
       setConversationId(conversation.id)
       setMessages(conversation.messages.map(toDisplay))
+      setFiles(conversation.files ?? [])
     } catch (caught) {
       setError(
         caught instanceof ApiError && caught.status === 404
@@ -115,6 +125,19 @@ export function useChat(): UseChat {
           : 'Could not load that conversation.',
       )
     }
+  }, [])
+
+  const removeFile = useCallback(async (fileId: string) => {
+    const id = conversationIdRef.current
+    if (id) {
+      try {
+        await removeConversationFile(id, fileId)
+      } catch {
+        setError('Could not remove that file from the chat.')
+        return
+      }
+    }
+    setFiles((current) => current.filter((file) => file.id !== fileId))
   }, [])
 
   const stop = useCallback(() => {
@@ -229,9 +252,18 @@ export function useChat(): UseChat {
   )
 
   const send = useCallback(
-    async (content: string) => {
+    async (content: string, attach: ConversationFileDto[] = []) => {
       const trimmed = content.trim()
       if (!trimmed) return
+
+      if (attach.length > 0) {
+        // Shown straight away: the server attaches them before answering, so
+        // this very question already draws on them.
+        setFiles((current) => [
+          ...current,
+          ...attach.filter((file) => !current.some((existing) => existing.id === file.id)),
+        ])
+      }
 
       const assistantId = localId('assistant')
       const userId = localId('user')
@@ -247,6 +279,7 @@ export function useChat(): UseChat {
           streamChat({
             content: trimmed,
             conversationId: conversationIdRef.current,
+            attachFileIds: attach.map((file) => file.id),
             onEvent,
             signal,
           }),
@@ -324,7 +357,9 @@ export function useChat(): UseChat {
     isStreaming,
     error,
     canRegenerate,
+    files,
     send,
+    removeFile,
     regenerate,
     edit,
     stop,

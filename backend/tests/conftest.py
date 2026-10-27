@@ -35,6 +35,25 @@ os.environ["DATABASE_URL"] = (
 os.environ["CORS_ORIGINS"] = "http://localhost:5173"
 os.environ["LOG_LEVEL"] = "WARNING"  # keep test output readable
 
+# Offline, free and deterministic, whatever the developer's `.env` selects.
+# A `.env` with EMBEDDING_PROVIDER=gemini and a real key once made the
+# PostgreSQL tests call the billed Gemini API -- slow, nondeterministic, and
+# failing when the event loop closed mid-request. Keys are blanked so that no
+# code path can reach a real provider even by accident.
+os.environ["AI_PROVIDER"] = "echo"
+os.environ["AI_MODEL"] = "claude-opus-5"
+os.environ["ANTHROPIC_API_KEY"] = ""
+os.environ["GEMINI_API_KEY"] = ""
+os.environ["EMBEDDING_PROVIDER"] = "hashing"
+os.environ["EMBEDDING_MODEL"] = ""
+os.environ["IMAGE_READER"] = "none"
+# The retrieval tests' expectations are written against these values; a
+# developer tuning their own floor (0.62 for gemini) must not change them.
+os.environ["RETRIEVAL_MIN_SIMILARITY"] = "0.15"
+os.environ["RETRIEVAL_TOP_K"] = "5"
+os.environ["CHUNK_SIZE_CHARACTERS"] = "1200"
+os.environ["CHUNK_OVERLAP_CHARACTERS"] = "200"
+
 # Uploads go to a throwaway directory, never to the real `backend/var/uploads`.
 # Without this the suite would leave files behind on the developer's machine
 # and, worse, tests would see each other's uploads.

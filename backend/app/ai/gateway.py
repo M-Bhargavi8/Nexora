@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-from app.ai.base import EmbeddingProvider, ModelProvider
+from app.ai.base import EmbeddingProvider, ImageReader, ModelProvider
 from app.ai.providers.echo import EchoProvider
 from app.ai.providers.hashing_embeddings import HashingEmbeddingProvider
 from app.core.config import get_settings
@@ -118,3 +118,19 @@ def get_embedding_provider() -> EmbeddingProvider:
 
     logger.info("Embedding provider: %s", provider.identity)
     return provider
+
+
+@lru_cache(maxsize=1)
+def get_image_reader() -> ImageReader | None:
+    """The configured image reader, or None when images are stored unread."""
+    settings = get_settings()
+    if settings.image_reader == "gemini":
+        from app.ai.providers.gemini_provider import GeminiImageReader
+
+        logger.info("Image reader: gemini (%s)", settings.image_reader_model)
+        return GeminiImageReader(
+            api_key=settings.gemini_api_key or "",
+            model=settings.image_reader_model,
+            timeout_seconds=settings.image_reader_timeout_seconds,
+        )
+    return None

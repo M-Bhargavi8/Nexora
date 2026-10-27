@@ -123,6 +123,10 @@ class Settings(BaseSettings):
     # Caps the reply length, which caps the cost of any single request. An
     # unbounded max_tokens is a way for one user to spend a lot of money.
     ai_max_tokens: int = 4096
+    # How long a reply may go without producing anything before it is
+    # abandoned. Generous, because "thinking" models can spend a while
+    # reasoning before their first visible token.
+    ai_stream_idle_timeout_seconds: float = Field(default=90.0, gt=0)
     # Dev-only knob: makes the echo provider pause between chunks so the
     # streaming UI can be watched arriving piece by piece. 0 in tests.
     ai_echo_chunk_delay_seconds: float = 0.0
@@ -147,6 +151,16 @@ class Settings(BaseSettings):
     # Uploads are authenticated, so this is keyed by user like the chat limit.
     upload_rate_limit_attempts: int = 20
     upload_rate_limit_window_seconds: int = 60
+
+    # --- Image reading ---
+    # "none" stores images without reading them. "gemini" asks a
+    # multimodal model to transcribe and describe each image on upload, so
+    # it can be searched and asked about. COST: one paid call per image.
+    image_reader: Literal["none", "gemini"] = "none"
+    # Verified working with this project's key on 2026-10-27; the 2.5
+    # models were listed but returned 404.
+    image_reader_model: str = "gemini-3-flash-preview"
+    image_reader_timeout_seconds: float = Field(default=60.0, gt=0)
 
     # --- Retrieval (RAG) ---
     # Which embedding adapter the gateway builds. Separate from `ai_provider`
@@ -189,6 +203,11 @@ class Settings(BaseSettings):
     # Returning nothing is the honest answer to a question the documents do not
     # address.
     retrieval_min_similarity: float = 0.15
+    # Passages taken from files added to the conversation itself. These
+    # skip the similarity floor -- the person put the file in this chat,
+    # which says more about relevance than a cosine score does -- so this
+    # cap is what bounds their cost in the prompt.
+    conversation_file_top_k: int = Field(default=6, ge=1, le=20)
 
     # --- CORS ---
     # Comma-separated list. Never "*" -- see cors_origin_list.
@@ -260,6 +279,9 @@ class Settings(BaseSettings):
                 "AI_PROVIDER=echo is a fake offline provider and must never "
                 "run in production -- it returns canned text, not model output."
             )
+
+        if self.image_reader == "gemini" and not self.gemini_api_key:
+            raise ValueError("IMAGE_READER=gemini requires GEMINI_API_KEY to be set.")
 
         if self.embedding_provider == "gemini" and not self.gemini_api_key:
             raise ValueError(

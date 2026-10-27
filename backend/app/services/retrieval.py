@@ -31,6 +31,10 @@ from app.services.chunking import chunk_text
 logger = get_logger(__name__)
 
 
+#: How many rows to read per wanted result, leaving room to drop repeats.
+_DUPLICATE_OVERFETCH = 3
+
+
 @dataclass(frozen=True, slots=True)
 class RetrievedChunk:
     """A passage found by a search, with where it came from and how well it fit."""
@@ -114,6 +118,35 @@ async def index_file(db: AsyncSession, *, file: File) -> int:
     return len(pieces)
 
 
+async def file_is_indexed(db: AsyncSession, *, file: File) -> bool:
+    """Whether `file` already has chunks from the active embedding model.
+
+    A file with no text counts as indexed: there is nothing to do for it.
+    """
+    if not file.extracted_text or file.status is not FileStatus.READY:
+        return True
+    identity = get_embedding_provider().identity
+    result = await db.execute(
+        select(FileChunk.id)
+        .where(
+            FileChunk.file_id == file.id,
+            FileChunk.embedding_model == identity,
+        )
+        .limit(1)
+    )
+    if result.first() is None:
+        return False
+    stale = await db.execute(
+        select(FileChunk.id)
+        .where(
+            FileChunk.file_id == file.id,
+            FileChunk.embedding_model != identity,
+        )
+        .limit(1)
+    )
+    return stale.first() is None
+
+
 def _check_vectors(
     provider: EmbeddingProvider, vectors: list[list[float]], *, expected: int
 ) -> None:
@@ -137,6 +170,18 @@ def _check_vectors(
             )
 
 
+async def embed_query(query: str) -> list[float]:
+    """Embed a question once, for callers that search more than once with it.
+
+    Each embedding is a paid provider call that adds latency before the first
+    token, so two searches for one question must share one vector.
+    """
+    provider = get_embedding_provider()
+    vectors = await provider.embed([query], purpose="query")
+    _check_vectors(provider, vectors, expected=1)
+    return vectors[0]
+
+
 async def search_chunks(
     db: AsyncSession,
     *,
@@ -145,6 +190,7 @@ async def search_chunks(
     limit: int | None = None,
     min_similarity: float | None = None,
     file_ids: list[uuid.UUID] | None = None,
+    query_vector: list[float] | None = None,
 ) -> list[RetrievedChunk]:
     """Find the passages most relevant to `query`, **for this user only**.
 
@@ -158,6 +204,9 @@ async def search_chunks(
     irrelevant, so asking about the weather with a tax return uploaded yields
     five passages about tax, presented as though they bore on the question.
     Returning nothing is the honest answer when the documents do not address it.
+
+    `query_vector`, from `embed_query`, skips embedding `query` again. It must
+    come from the active provider, which `embed_query` guarantees.
     """
     settings = get_settings()
     limit = limit if limit is not None else settings.retrieval_top_k
@@ -169,9 +218,8 @@ async def search_chunks(
         return []
 
     provider = get_embedding_provider()
-    query_vectors = await provider.embed([query], purpose="query")
-    _check_vectors(provider, query_vectors, expected=1)
-    [query_vector] = query_vectors
+    if query_vector is None:
+        query_vector = await embed_query(query)
 
     # `cosine_distance` is pgvector's `<=>` operator: 0 means identical
     # direction, 1 means unrelated, 2 means opposite. Similarity is the
@@ -188,7 +236,9 @@ async def search_chunks(
         # an older model wait for `scripts.reindex` instead of being compared.
         .where(FileChunk.embedding_model == provider.identity)
         .order_by(distance)
-        .limit(limit)
+        # Over-fetch, because identical passages are dropped below and the
+        # caller still deserves up to `limit` distinct ones.
+        .limit(limit * _DUPLICATE_OVERFETCH)
     )
 
     if file_ids:
@@ -199,11 +249,20 @@ async def search_chunks(
     result = await db.execute(statement)
 
     found: list[RetrievedChunk] = []
+    seen: set[str] = set()
     for chunk, filename, chunk_distance in result.all():
         similarity = 1.0 - float(chunk_distance)
-        if similarity < threshold:
+        if similarity < threshold or len(found) == limit:
             # Ordered by distance, so everything after this is worse too.
             break
+        # The same passage stored twice -- two copies of a document, or a
+        # PDF and the DOCX it was exported from -- would otherwise fill the
+        # results with repeats and crowd out everything else. Keep the
+        # closest copy; whitespace differences do not make a new passage.
+        key = " ".join(chunk.content.split())
+        if key in seen:
+            continue
+        seen.add(key)
         found.append(
             RetrievedChunk(
                 chunk_id=chunk.id,

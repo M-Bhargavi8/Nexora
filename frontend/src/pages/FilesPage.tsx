@@ -76,6 +76,21 @@ export default function FilesPage() {
             </div>
           )}
 
+          {library.notice && (
+            <div className="mt-4 flex items-start gap-3 rounded-lg border border-ink-600 bg-ink-850 px-3 py-2">
+              <p role="status" className="flex-1 text-xs text-mist-300">
+                {library.notice}
+              </p>
+              <button
+                type="button"
+                onClick={library.dismissError}
+                className="text-xs text-mist-500 hover:text-mist-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-brand-500"
+              >
+                Dismiss
+              </button>
+            </div>
+          )}
+
           {library.pending.length > 0 && (
             <ul className="mt-4 space-y-2">
               {library.pending.map((upload) => (

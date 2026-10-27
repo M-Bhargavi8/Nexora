@@ -13,9 +13,10 @@ every reader of it.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from collections.abc import Sequence
-from typing import BinaryIO
+from typing import BinaryIO, NamedTuple
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -38,9 +39,16 @@ from app.services.upload import (
 logger = get_logger(__name__)
 
 
+class UploadResult(NamedTuple):
+    """The stored file, and whether it was an existing copy reused."""
+
+    file: File
+    reused: bool
+
+
 async def create_file(
     db: AsyncSession, *, user_id: uuid.UUID, stream: BinaryIO, filename: str
-) -> File:
+) -> UploadResult:
     """Validate, store and parse one upload.
 
     Raises `UploadRejected` (the caller turns it into a 400) when the file is
@@ -48,12 +56,17 @@ async def create_file(
     is **not** an error: it is stored with a status saying so, because a
     scanned PDF or a corrupt spreadsheet is still the user's file and deleting
     it out from under them would be worse than telling them the truth.
+
+    If this user already has a file with identical bytes, that file is
+    returned with `reused=True` and nothing new is stored. Identical bytes
+    extract and embed identically, so a second copy would only make every
+    search return the same passage twice.
     """
     settings = get_settings()
     safe_name = sanitize_filename(filename)
 
     try:
-        storage_key, size, head = await storage.save_upload(
+        storage_key, size, head, sha256 = await storage.save_upload(
             stream, max_bytes=settings.max_upload_bytes
         )
     except storage.UploadTooLarge as error:
@@ -70,6 +83,21 @@ async def create_file(
         storage.delete_stored_file(storage_key)
         raise
 
+    # Only after identification: a stored file renamed to a mismatched
+    # extension must still be refused, not quietly matched to its twin.
+    existing = await _find_identical(db, user_id=user_id, sha256=sha256)
+    if existing is not None:
+        storage.delete_stored_file(storage_key)
+        logger.info(
+            "Upload matched an existing file; reusing it",
+            extra={"file_id": str(existing.id)},
+        )
+        # The earlier upload may have failed to index (provider down), or
+        # been indexed by a model no longer active. Uploading again is how a
+        # person would try to fix that, so give it the same chance.
+        await _index_quietly(db, existing)
+        return UploadResult(existing, reused=True)
+
     path = storage.path_for(storage_key)
     status = FileStatus.READY
     text: str | None = None
@@ -79,13 +107,22 @@ async def create_file(
     try:
         if not kind.extractable:
             # An image. Pillow decoding the header is what proves the magic
-            # bytes were not simply glued to the front of something else.
+            # bytes were not simply glued to the front of something else --
+            # and it happens *before* any bytes go to an image reader.
             width, height = await validate_image_async(path)
             status = FileStatus.UNSUPPORTED
             error_message = (
                 f"Images are stored but not yet read ({width}x{height}). "
                 "Reading them needs a vision model."
             )
+            described = await _read_image(path, kind.content_type)
+            if described:
+                status = FileStatus.READY
+                text = described[: settings.max_extracted_characters]
+                error_message = (
+                    "Read by an AI model, which can make mistakes -- "
+                    "check anything important against the image."
+                )
         else:
             extraction = await extract_text(path, kind)
             text = extraction.text
@@ -119,6 +156,7 @@ async def create_file(
         storage_key=storage_key,
         content_type=kind.content_type,
         size_bytes=size,
+        content_sha256=sha256,
         status=status,
         extracted_text=text,
         page_count=page_count,
@@ -138,14 +176,60 @@ async def create_file(
         },
     )
 
-    # Index for retrieval. Imported here rather than at module scope because
-    # `retrieval` imports the AI gateway, and the gateway imports settings --
-    # a top-level import would make uploading a file depend on the embedding
-    # provider being constructible.
-    from app.services.retrieval import index_file
+    await _index_quietly(db, file)
+    return UploadResult(file, reused=False)
+
+
+async def _read_image(path, content_type: str) -> str | None:  # noqa: ANN001
+    """Transcribe and describe an image, if an image reader is configured.
+
+    Returns None when there is no reader, or when reading fails. Failure
+    keeps the image stored and unread rather than failing the upload --
+    the same rule as indexing: the person's file matters more than one
+    provider call.
+    """
+    from app.ai.gateway import get_image_reader
+
+    reader = get_image_reader()
+    if reader is None:
+        return None
+    try:
+        data = await asyncio.to_thread(path.read_bytes)
+        described = await reader.read_image(data, mime_type=content_type)
+    except Exception:  # noqa: BLE001 - reading must not fail the upload
+        logger.exception("Image reading failed; storing the image unread")
+        return None
+    return described or None
+
+
+async def _find_identical(
+    db: AsyncSession, *, user_id: uuid.UUID, sha256: str
+) -> File | None:
+    """This user's oldest file with these exact bytes, if any.
+
+    Scoped to the user: the same hash in another account must never be
+    visible, or uploading a document would reveal who else holds it.
+    """
+    result = await db.execute(
+        select(File)
+        .where(File.user_id == user_id, File.content_sha256 == sha256)
+        .order_by(File.created_at, File.id)
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
+async def _index_quietly(db: AsyncSession, file: File) -> None:
+    """Index for retrieval if needed; never fail the upload over it."""
+    # Imported here rather than at module scope because `retrieval` imports
+    # the AI gateway, and the gateway imports settings -- a top-level import
+    # would make uploading a file depend on the embedding provider being
+    # constructible.
+    from app.services.retrieval import file_is_indexed, index_file
 
     try:
-        await index_file(db, file=file)
+        if not await file_is_indexed(db, file=file):
+            await index_file(db, file=file)
     except Exception:  # noqa: BLE001 - indexing must not fail the upload
         # The file is stored and readable; only search is affected. Losing the
         # upload because the embedding provider was briefly unavailable would
@@ -154,8 +238,6 @@ async def create_file(
             "Failed to index an uploaded file for retrieval",
             extra={"file_id": str(file.id)},
         )
-
-    return file
 
 
 async def get_file(

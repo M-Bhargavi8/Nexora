@@ -26,6 +26,7 @@ from sqlalchemy import (
     DateTime,
     Enum,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
@@ -89,6 +90,18 @@ class File(Base):
     # silently overflows is worse than one that is simply wide enough.
     size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
 
+    # SHA-256 of the stored bytes, hex. Lets an upload of a file the user
+    # already has reuse the existing copy instead of storing, extracting and
+    # embedding it again -- duplicates otherwise fill every search with the
+    # same passage several times over.
+    #
+    # Only ever compared within one user's files. Matching across users would
+    # tell one person that somebody else holds the same document.
+    #
+    # Nullable: rows from before migration 0006 have none until
+    # `python -m scripts.backfill_file_hashes` reads their bytes.
+    content_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
     status: Mapped[FileStatus] = mapped_column(
         Enum(
             FileStatus,
@@ -145,6 +158,9 @@ class File(Base):
             "status IN ('ready', 'extracted_empty', 'unsupported', 'failed')",
             name="file_status",
         ),
+        # Not unique: rows uploaded before hashing existed may already be
+        # duplicates, and refusing to store them is not this index's job.
+        Index("ix_files_user_id_content_sha256", "user_id", "content_sha256"),
     )
 
     def __repr__(self) -> str:

@@ -42,6 +42,9 @@ class FileDetailResponse(FileResponse):
     """A file together with the text extracted from it."""
 
     extracted_text: str | None = None
+    # True when the upload matched a file the user already had, and that
+    # existing file is what is returned. Only meaningful on upload.
+    reused: bool = False
 
 
 class FilePage(BaseModel):

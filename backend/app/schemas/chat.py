@@ -54,6 +54,17 @@ class ChatRequest(BaseModel):
         max_length=MAX_SCOPED_FILES,
         description="Limit retrieval to these files. Omit to search them all.",
     )
+    # Files to add to this conversation before answering -- typically the
+    # ones just uploaded in the chat. Unlike `file_ids`, this is remembered:
+    # every later question in the conversation draws on them first.
+    #
+    # SECURITY: only the caller's own files are attached; other ids are
+    # ignored.
+    attach_file_ids: list[uuid.UUID] | None = Field(
+        default=None,
+        max_length=MAX_SCOPED_FILES,
+        description="Add these files to the conversation before answering.",
+    )
 
 
 class RegenerateRequest(BaseModel):
@@ -136,10 +147,23 @@ class ConversationResponse(BaseModel):
     updated_at: datetime
 
 
+class ConversationFileResponse(BaseModel):
+    """A file attached to a conversation -- enough to show it as a chip."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    filename: str
+    status: str
+    has_text: bool = False
+
+
 class ConversationDetailResponse(ConversationResponse):
     """A conversation together with its full message history."""
 
     messages: list[MessageResponse]
+    # The files this conversation answers from first.
+    files: list[ConversationFileResponse] = []
 
 
 class ConversationPage(BaseModel):

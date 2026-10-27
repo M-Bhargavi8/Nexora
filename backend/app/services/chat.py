@@ -19,6 +19,8 @@ from app.ai.base import ChatMessage
 from app.core.clock import utcnow
 from app.core.logging import get_logger
 from app.models.conversation import TITLE_MAX_LENGTH, Conversation
+from app.models.conversation_file import ConversationFile
+from app.models.file import File
 from app.models.message import Message, MessageRole
 
 logger = get_logger(__name__)
@@ -372,3 +374,81 @@ async def load_history(
         ChatMessage(role=message.role.value, content=message.content)
         for message in result.scalars().all()
     ]
+
+
+async def attach_files(
+    db: AsyncSession,
+    *,
+    conversation_id: uuid.UUID,
+    user_id: uuid.UUID,
+    file_ids: Sequence[uuid.UUID],
+) -> list[uuid.UUID]:
+    """Add files to a conversation. Returns the ids actually attached.
+
+    SECURITY: only files **owned by `user_id`** are attached. An id belonging
+    to someone else, or to nothing, is silently skipped -- the same answer in
+    both cases, so this cannot be used to probe which file ids exist. The
+    caller must already have authorized the conversation itself.
+
+    Idempotent: attaching a file that is already attached changes nothing.
+    """
+    if not file_ids:
+        return []
+
+    owned = (
+        await db.execute(
+            select(File.id).where(File.id.in_(set(file_ids)), File.user_id == user_id)
+        )
+    ).scalars().all()
+    already = set(
+        (
+            await db.execute(
+                select(ConversationFile.file_id).where(
+                    ConversationFile.conversation_id == conversation_id
+                )
+            )
+        ).scalars().all()
+    )
+    for file_id in owned:
+        if file_id not in already:
+            db.add(ConversationFile(conversation_id=conversation_id, file_id=file_id))
+    await db.commit()
+    return list(owned)
+
+
+async def conversation_files(
+    db: AsyncSession, *, conversation_id: uuid.UUID, user_id: uuid.UUID
+) -> list[File]:
+    """The files attached to a conversation, oldest first.
+
+    Filters on the file's owner as well as the link. Links are only ever
+    created for the owner's own files, so this is belt and braces -- but it
+    means a bad row can never surface another person's file here.
+    """
+    result = await db.execute(
+        select(File)
+        .join(ConversationFile, ConversationFile.file_id == File.id)
+        .where(
+            ConversationFile.conversation_id == conversation_id,
+            File.user_id == user_id,
+        )
+        .order_by(ConversationFile.created_at, File.id)
+    )
+    return list(result.scalars().all())
+
+
+async def detach_file(
+    db: AsyncSession, *, conversation_id: uuid.UUID, file_id: uuid.UUID
+) -> bool:
+    """Remove a file from a conversation (the file itself is kept).
+
+    Returns whether a link existed. The caller authorizes the conversation.
+    """
+    result = await db.execute(
+        delete(ConversationFile).where(
+            ConversationFile.conversation_id == conversation_id,
+            ConversationFile.file_id == file_id,
+        )
+    )
+    await db.commit()
+    return bool(result.rowcount)

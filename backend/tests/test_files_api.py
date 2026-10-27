@@ -770,3 +770,112 @@ class TestAccountDeletion:
         await db.commit()
 
         assert (await db.execute(select(File))).scalars().all() == []
+
+
+# --- duplicate uploads ------------------------------------------------------
+
+
+class TestDuplicateUploads:
+    """Uploading bytes the user already has reuses the stored file.
+
+    Without this, each copy is extracted and embedded again, and every search
+    returns the same passage once per copy.
+    """
+
+    async def test_the_same_bytes_twice_reuse_the_first_file(
+        self, client: AsyncClient
+    ) -> None:
+        await sign_up(client)
+        first = await upload(client, b"quarterly report", "report.txt")
+        second = await upload(client, b"quarterly report", "report.txt")
+
+        assert first.status_code == 201
+        assert first.json()["reused"] is False
+        # 200, not 201: nothing was created.
+        assert second.status_code == 200
+        assert second.json()["reused"] is True
+        assert second.json()["id"] == first.json()["id"]
+
+    async def test_stores_one_row_and_one_file_on_disk(
+        self, client: AsyncClient, db: AsyncSession
+    ) -> None:
+        from tests.conftest import TEST_UPLOAD_DIR
+
+        await sign_up(client)
+        for _ in range(3):
+            await upload(client, b"quarterly report", "report.txt")
+
+        assert len((await db.execute(select(File))).scalars().all()) == 1
+        assert len(list(TEST_UPLOAD_DIR.iterdir())) == 1
+
+    async def test_records_the_content_hash(
+        self, client: AsyncClient, db: AsyncSession
+    ) -> None:
+        import hashlib
+
+        await sign_up(client)
+        await upload(client, b"quarterly report", "report.txt")
+
+        [stored] = (await db.execute(select(File))).scalars().all()
+        assert stored.content_sha256 == hashlib.sha256(b"quarterly report").hexdigest()
+
+    async def test_a_new_name_does_not_make_a_new_file(
+        self, client: AsyncClient
+    ) -> None:
+        """Identity is the bytes. The existing file keeps its original name."""
+        await sign_up(client)
+        await upload(client, b"quarterly report", "report.txt")
+        second = await upload(client, b"quarterly report", "copy of report.txt")
+
+        assert second.json()["reused"] is True
+        assert second.json()["filename"] == "report.txt"
+
+    async def test_different_bytes_are_different_files(
+        self, client: AsyncClient
+    ) -> None:
+        await sign_up(client)
+        first = await upload(client, b"version one", "report.txt")
+        second = await upload(client, b"version two", "report.txt")
+
+        assert second.status_code == 201
+        assert second.json()["id"] != first.json()["id"]
+
+    async def test_a_mismatched_extension_is_still_rejected(
+        self, client: AsyncClient
+    ) -> None:
+        """Type checks run before the duplicate check, so renaming a stored
+        file to a wrong extension is refused, not matched to its twin."""
+        await sign_up(client)
+        await upload(client, make_pdf(), "paper.pdf")
+
+        renamed = await upload(client, make_pdf(), "paper.txt")
+
+        assert renamed.status_code == 400
+
+    async def test_another_users_identical_file_is_never_reused(
+        self, client: AsyncClient
+    ) -> None:
+        """SECURITY: reusing across accounts would hand Mallory Ada's file id,
+        and tell her that Ada holds this exact document."""
+        await sign_up(client, "ada@example.com")
+        ada = (await upload(client, b"shared memo", "memo.txt")).json()
+        await client.post(f"{API}/auth/logout")
+        await sign_up(client, "mallory@example.com")
+
+        mallory = await upload(client, b"shared memo", "memo.txt")
+
+        assert mallory.status_code == 201
+        assert mallory.json()["reused"] is False
+        assert mallory.json()["id"] != ada["id"]
+
+    async def test_after_deleting_the_same_bytes_upload_fresh(
+        self, client: AsyncClient
+    ) -> None:
+        await sign_up(client)
+        first = (await upload(client, b"quarterly report", "report.txt")).json()
+        await client.delete(f"{API}/files/{first['id']}")
+
+        again = await upload(client, b"quarterly report", "report.txt")
+
+        assert again.status_code == 201
+        assert again.json()["id"] != first["id"]

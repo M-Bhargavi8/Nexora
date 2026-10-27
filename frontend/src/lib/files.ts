@@ -26,6 +26,9 @@ export interface StoredFileDto {
 
 export interface StoredFileDetailDto extends StoredFileDto {
   extracted_text: string | null
+  /** On upload: true when the bytes matched a file the user already had, and
+   *  that existing file was returned instead of storing a copy. */
+  reused?: boolean
 }
 
 export interface FilePageDto {
@@ -94,7 +97,9 @@ export function uploadFile(
         // Falls through to the status-based message below.
       }
 
-      if (xhr.status === 201) {
+      // 201 stored a new file; 200 means identical bytes were already stored
+      // and that file came back instead. Both are success.
+      if (xhr.status === 201 || xhr.status === 200) {
         resolve(parsed as StoredFileDetailDto)
         return
       }
