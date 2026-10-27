@@ -17,8 +17,12 @@ from app.ai.providers.echo import EchoProvider
 from app.ai.providers.hashing_embeddings import HashingEmbeddingProvider
 from app.core.config import get_settings
 from app.core.logging import get_logger
+from app.models.chunk import EMBEDDING_DIMENSIONS
 
 logger = get_logger(__name__)
+
+#: Used when EMBEDDING_PROVIDER=gemini and EMBEDDING_MODEL is unset.
+DEFAULT_GEMINI_EMBEDDING_MODEL = "gemini-embedding-001"
 
 
 @lru_cache(maxsize=1)
@@ -83,19 +87,34 @@ def get_embedding_provider() -> EmbeddingProvider:
     a name in the `embedding_provider` Literal, and a branch below. Nothing
     above this function changes.
 
-    IMPORTANT: switching providers invalidates every stored vector. Embeddings
-    from two different models are not comparable -- searching new query vectors
-    against old stored ones returns confident nonsense rather than an error.
-    Changing this setting means re-embedding everything.
+    Switching providers or models does not corrupt retrieval: every chunk
+    records the `identity` of the model that embedded it, and search compares
+    only against chunks from the active one. Old chunks simply stop matching
+    until `python -m scripts.reindex` re-embeds them.
     """
     settings = get_settings()
     provider_name = settings.embedding_provider
 
+    provider: EmbeddingProvider
     if provider_name == "hashing":
         logger.warning(
             "Using the offline hashing embedding provider -- retrieval is "
             "lexical (shared words) and not semantic"
         )
-        return HashingEmbeddingProvider()
+        provider = HashingEmbeddingProvider(dimensions=EMBEDDING_DIMENSIONS)
+    elif provider_name == "gemini":
+        from app.ai.providers.gemini_provider import GeminiEmbeddingProvider
 
-    raise ValueError(f"Unknown embedding provider: {provider_name!r}")
+        # The width is the storage column's, not a setting: the column is a
+        # fixed vector(n), so a provider must produce exactly that.
+        provider = GeminiEmbeddingProvider(
+            api_key=settings.gemini_api_key or "",
+            model=settings.embedding_model or DEFAULT_GEMINI_EMBEDDING_MODEL,
+            dimensions=EMBEDDING_DIMENSIONS,
+            timeout_seconds=settings.embedding_timeout_seconds,
+        )
+    else:
+        raise ValueError(f"Unknown embedding provider: {provider_name!r}")
+
+    logger.info("Embedding provider: %s", provider.identity)
+    return provider

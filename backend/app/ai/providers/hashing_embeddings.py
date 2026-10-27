@@ -40,7 +40,7 @@ import re
 from collections import Counter
 from collections.abc import Sequence
 
-from app.ai.base import EmbeddingProvider
+from app.ai.base import EmbeddingProvider, EmbeddingPurpose
 
 # Small enough to keep rows cheap, large enough that unrelated words rarely
 # collide into the same bucket. Real models are 768-3072; the number here is
@@ -88,6 +88,9 @@ class HashingEmbeddingProvider(EmbeddingProvider):
     """Offline lexical embeddings. See the module docstring for the caveats."""
 
     name = "hashing"
+    # Bump this if tokenisation, stopwords or weighting ever change: vectors
+    # written by the old algorithm would no longer match new query vectors.
+    model = "hashing-v1"
 
     def __init__(self, dimensions: int = DIMENSIONS) -> None:
         self.dimensions = dimensions
@@ -118,6 +121,15 @@ class HashingEmbeddingProvider(EmbeddingProvider):
             vector = [value / norm for value in vector]
         return vector
 
-    async def embed(self, texts: Sequence[str]) -> list[list[float]]:
-        """Embed a batch. Pure computation, so there is nothing to await."""
+    async def embed(
+        self,
+        texts: Sequence[str],
+        *,
+        purpose: EmbeddingPurpose = "document",
+    ) -> list[list[float]]:
+        """Embed a batch. Pure computation, so there is nothing to await.
+
+        `purpose` is ignored: a bag of hashed words looks the same whichever
+        side of the search it is on.
+        """
         return [self._embed_one(text) for text in texts]

@@ -26,6 +26,12 @@ from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
+#: What a piece of text is being embedded *for*. Some models embed a question
+#: and a passage differently, because a question and its answer rarely look
+#: alike, and asking the model which side of the search a text is on measurably
+#: improves retrieval. Providers without the distinction ignore it.
+EmbeddingPurpose = Literal["document", "query"]
+
 # Only the two roles a conversation actually contains. A system prompt is a
 # separate parameter rather than a role, because that is how it is modelled by
 # the providers we target -- and conflating them makes it possible for user
@@ -155,13 +161,33 @@ class EmbeddingProvider(ABC):
     #: Short identifier used in logs.
     name: str
 
+    #: The specific model, or algorithm version, behind this provider. Two
+    #: versions of one vendor's model are as incomparable as two vendors.
+    model: str
+
     #: Length of the vectors produced. Fixed per model, and baked into the
     #: database column -- changing it means re-embedding every stored chunk,
     #: because vectors from two different models are not comparable.
     dimensions: int
 
+    @property
+    def identity(self) -> str:
+        """The label stored beside every vector this provider writes.
+
+        Vectors are only comparable when this matches exactly. Retrieval
+        filters on it, so switching models makes old vectors *unsearchable*
+        until they are re-embedded -- never silently compared against new ones,
+        which would return confident nonsense instead of an error.
+        """
+        return f"{self.name}:{self.model}:{self.dimensions}"
+
     @abstractmethod
-    async def embed(self, texts: Sequence[str]) -> list[list[float]]:
+    async def embed(
+        self,
+        texts: Sequence[str],
+        *,
+        purpose: EmbeddingPurpose = "document",
+    ) -> list[list[float]]:
         """Embed a batch of texts, returning one vector per input, in order.
 
         Batched rather than one-at-a-time because hosted embedding APIs charge

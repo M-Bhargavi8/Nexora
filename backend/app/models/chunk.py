@@ -30,6 +30,7 @@ from sqlalchemy import (
     Index,
     Integer,
     LargeBinary,
+    String,
     Text,
     TypeDecorator,
     UniqueConstraint,
@@ -145,6 +146,17 @@ class FileChunk(Base):
         nullable=False,
     )
 
+    # Which model produced `embedding`, as `EmbeddingProvider.identity`
+    # (`provider:model:dimensions`).
+    #
+    # Vectors from two models occupy unrelated spaces: a cosine distance
+    # between them is a number, but not a meaningful one. Retrieval only ever
+    # compares a query against chunks whose label matches the active
+    # provider, so changing the embedding model makes old chunks unsearchable
+    # until re-embedded (`python -m scripts.reindex`) rather than silently
+    # wrong. Not an enum: model names change faster than migrations should.
+    embedding_model: Mapped[str] = mapped_column(String(200), nullable=False)
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, nullable=False
     )
@@ -159,6 +171,9 @@ class FileChunk(Base):
         UniqueConstraint("file_id", "position", name="uq_file_chunks_file_position"),
         # The index every retrieval query needs: "this user's chunks".
         Index("ix_file_chunks_user_id", "user_id"),
+        # Retrieval filters on owner *and* model, and the re-index command
+        # looks for chunks whose model is not the active one.
+        Index("ix_file_chunks_user_id_embedding_model", "user_id", "embedding_model"),
         # The vector index.
         #
         # Declared here rather than as raw SQL in the migration, and that is

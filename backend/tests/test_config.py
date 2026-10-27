@@ -84,6 +84,9 @@ def build_production_settings(**overrides: object) -> Settings:
         "session_cookie_secure": True,
         "ai_provider": "anthropic",
         "anthropic_api_key": "sk-not-a-real-key",
+        # Production refuses the lexical hashing embeddings.
+        "embedding_provider": "gemini",
+        "gemini_api_key": "not-a-real-key",
     }
     values.update(overrides)
     return build_settings(**values)

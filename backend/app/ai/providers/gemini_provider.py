@@ -26,6 +26,8 @@ naming; when it matters, it is this one file that changes.
 
 from __future__ import annotations
 
+import asyncio
+import math
 from collections.abc import AsyncIterator, Sequence
 from typing import Any
 
@@ -35,6 +37,8 @@ from google.genai import types as genai_types
 
 from app.ai.base import (
     ChatMessage,
+    EmbeddingProvider,
+    EmbeddingPurpose,
     ModelAuthError,
     ModelProvider,
     ModelProviderError,
@@ -201,3 +205,123 @@ class GeminiProvider(ModelProvider):
 
         logger.warning("Model provider rejected the request (HTTP %s)", code)
         return ModelUnavailableError("Model provider returned an error")
+
+
+#: Gemini's task types for the two sides of a search. Documents and questions
+#: are embedded differently so that a question lands near its answer rather
+#: than near other questions.
+_PURPOSE_TO_TASK = {"document": "RETRIEVAL_DOCUMENT", "query": "RETRIEVAL_QUERY"}
+
+#: Texts per request. Kept conservative: the API caps batch size, and a smaller
+#: batch also bounds how much work one timeout can throw away.
+EMBED_BATCH_SIZE = 50
+
+
+class GeminiEmbeddingProvider(EmbeddingProvider):
+    """Semantic embeddings from the Gemini Developer API.
+
+    Lives in this module so that it remains the only one importing the
+    `google-genai` SDK, and so it shares `GeminiProvider`'s error mapping --
+    the same 4xx/5xx meanings apply.
+
+    **Dimensions.** The storage column is a fixed `vector(n)`. Gemini embedding
+    models can return a shortened vector (`output_dimensionality`), so this
+    adapter asks for exactly the column's width, and then *checks* what came
+    back: a model that ignores the request must fail loudly rather than write
+    vectors the column or the index cannot hold.
+
+    **Cost.** Google bills each call per input token. Indexing embeds every
+    chunk of every uploaded file once; each chat question embeds one short
+    query; re-indexing (`scripts.reindex`) embeds everything again.
+    """
+
+    name = "gemini"
+
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        model: str,
+        dimensions: int,
+        timeout_seconds: float,
+        client: Any | None = None,
+    ) -> None:
+        # Injectable for tests, exactly as for the chat adapter.
+        self._client = client or genai.Client(api_key=api_key)
+        self.model = model
+        self.dimensions = dimensions
+        self._timeout_seconds = timeout_seconds
+
+    async def embed(
+        self,
+        texts: Sequence[str],
+        *,
+        purpose: EmbeddingPurpose = "document",
+    ) -> list[list[float]]:
+        vectors: list[list[float]] = []
+        for start in range(0, len(texts), EMBED_BATCH_SIZE):
+            batch = list(texts[start : start + EMBED_BATCH_SIZE])
+            vectors.extend(await self._embed_batch(batch, purpose))
+        return vectors
+
+    async def _embed_batch(
+        self, texts: list[str], purpose: EmbeddingPurpose
+    ) -> list[list[float]]:
+        config = genai_types.EmbedContentConfig(
+            task_type=_PURPOSE_TO_TASK[purpose],
+            output_dimensionality=self.dimensions,
+        )
+        try:
+            # Bounded, because indexing and chat both wait on this. A hung
+            # embedding call must become an error, not a request that never
+            # finishes.
+            response = await asyncio.wait_for(
+                self._client.aio.models.embed_content(
+                    model=self.model, contents=texts, config=config
+                ),
+                timeout=self._timeout_seconds,
+            )
+        except TimeoutError as exc:
+            logger.warning("Embedding provider timed out")
+            raise ModelUnavailableError("Embedding provider timed out") from exc
+        except genai_errors.ClientError as exc:
+            raise GeminiProvider._client_error(exc) from exc
+        except genai_errors.APIError as exc:
+            # ServerError and anything else from the SDK. Never `str(exc)`:
+            # it embeds the provider's response body.
+            logger.warning("Embedding provider error %s", getattr(exc, "code", "?"))
+            raise ModelUnavailableError("Embedding provider returned an error") from exc
+        except (ConnectionError, OSError) as exc:
+            logger.warning(
+                "Could not reach the embedding provider: %s", type(exc).__name__
+            )
+            raise ModelUnavailableError("Embedding provider is unreachable") from exc
+
+        embeddings = response.embeddings or []
+        if len(embeddings) != len(texts):
+            raise ModelProviderError(
+                f"Embedding provider returned {len(embeddings)} vectors "
+                f"for {len(texts)} texts"
+            )
+
+        vectors: list[list[float]] = []
+        for embedding in embeddings:
+            values = list(embedding.values or [])
+            if len(values) != self.dimensions:
+                raise ModelProviderError(
+                    f"Embedding provider returned {len(values)} dimensions, "
+                    f"expected {self.dimensions}"
+                )
+            vectors.append(_normalise(values))
+        return vectors
+
+
+def _normalise(values: list[float]) -> list[float]:
+    """Scale to unit length.
+
+    Google returns unit vectors only at a model's full width; shortened ones
+    are not normalised. Cosine distance does not care, but normalising keeps
+    every stored vector in the same form whatever width was requested.
+    """
+    norm = math.sqrt(sum(value * value for value in values))
+    return [value / norm for value in values] if norm > 0 else values

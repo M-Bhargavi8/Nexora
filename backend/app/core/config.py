@@ -152,10 +152,18 @@ class Settings(BaseSettings):
     # Which embedding adapter the gateway builds. Separate from `ai_provider`
     # because embeddings and chat generation are bought separately.
     #
-    # WARNING: changing this invalidates every stored vector. Embeddings from
-    # two models are not comparable, and searching across them returns
-    # confident nonsense rather than an error. Re-embed everything.
-    embedding_provider: Literal["hashing"] = "hashing"
+    # Changing this (or `embedding_model`) makes existing chunks unsearchable
+    # until re-embedded: each chunk records its model, and search compares only
+    # against the active one. Run `python -m scripts.reindex` after a change.
+    embedding_provider: Literal["hashing", "gemini"] = "hashing"
+    # The embedding model id. Unset means the provider's default:
+    # `gemini-embedding-001` for gemini. Ignored by hashing, whose algorithm
+    # version is fixed in code.
+    embedding_model: str | None = None
+    # Bounds one embedding request. Chat waits on the query embedding, so this
+    # is also the worst case a slow provider adds before the first token --
+    # after which retrieval is skipped and the chat continues without it.
+    embedding_timeout_seconds: float = Field(default=20.0, gt=0)
 
     # Target size of one chunk, in characters.
     #
@@ -253,18 +261,20 @@ class Settings(BaseSettings):
                 "run in production -- it returns canned text, not model output."
             )
 
-        # NOTE: there is deliberately no production guard on
-        # `embedding_provider`, unlike the one above for `ai_provider`.
-        #
-        # The echo chat provider returns *fabricated* text, and a real
-        # alternative exists, so refusing to boot is right. The hashing
-        # embedding provider returns genuine -- merely weak -- retrieval, and
-        # right now it is the only implementation there is. Failing startup
-        # would make the whole application unbootable in production, including
-        # the chat that has nothing to do with retrieval.
-        #
-        # It warns loudly instead, in `get_embedding_provider()`. A guard
-        # belongs here the moment a second provider exists to switch to.
+        if self.embedding_provider == "gemini" and not self.gemini_api_key:
+            raise ValueError(
+                "EMBEDDING_PROVIDER=gemini requires GEMINI_API_KEY to be set."
+            )
+
+        # The hashing provider returns genuine but weak (lexical) retrieval.
+        # While it was the only implementation, refusing it in production would
+        # have made the whole application unbootable. Now that a semantic
+        # provider exists, production must use one.
+        if self.app_env == "production" and self.embedding_provider == "hashing":
+            raise ValueError(
+                "EMBEDDING_PROVIDER=hashing is a lexical offline stand-in and "
+                "must not run in production. Use a semantic provider (gemini)."
+            )
         return self
 
     @model_validator(mode="after")

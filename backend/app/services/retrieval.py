@@ -17,9 +17,10 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, exists, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.ai.base import EmbeddingProvider
 from app.ai.gateway import get_embedding_provider
 from app.core.config import get_settings
 from app.core.logging import get_logger
@@ -67,25 +68,23 @@ async def index_file(db: AsyncSession, *, file: File) -> int:
     if not pieces:
         return 0
 
-    # Delete first, in the same transaction as the insert below, so a re-index
-    # is atomic: the file is never left with no chunks at all if embedding
-    # fails part way.
-    await db.execute(delete(FileChunk).where(FileChunk.file_id == file.id))
-
     provider = get_embedding_provider()
+    # Embed *before* touching the database. A hosted provider is a network
+    # call that can be slow or fail; doing it first means no write transaction
+    # is held open across it, and a failure leaves the file's existing chunks
+    # exactly as they were -- still searchable under their own model.
+    #
     # One batched call rather than one per chunk. Hosted embedding APIs charge
     # and rate-limit per request, so a 200-chunk document must not be 200 round
     # trips.
-    vectors = await provider.embed([piece.content for piece in pieces])
+    vectors = await provider.embed(
+        [piece.content for piece in pieces], purpose="document"
+    )
+    _check_vectors(provider, vectors, expected=len(pieces))
 
-    if len(vectors) != len(pieces):
-        # A provider that drops or reorders results would silently pair each
-        # chunk with another chunk's meaning, and retrieval would return
-        # confidently wrong passages. Fail instead.
-        raise ValueError(
-            f"Embedding provider returned {len(vectors)} vectors "
-            f"for {len(pieces)} chunks."
-        )
+    # Delete and insert in one transaction, so a re-index is atomic: readers
+    # see the old chunks or the new ones, never a file with none.
+    await db.execute(delete(FileChunk).where(FileChunk.file_id == file.id))
 
     for position, (piece, vector) in enumerate(zip(pieces, vectors, strict=True)):
         db.add(
@@ -99,15 +98,43 @@ async def index_file(db: AsyncSession, *, file: File) -> int:
                 start_offset=piece.start_offset,
                 end_offset=piece.end_offset,
                 embedding=vector,
+                embedding_model=provider.identity,
             )
         )
 
     await db.commit()
     logger.info(
         "File indexed for retrieval",
-        extra={"file_id": str(file.id), "chunks": len(pieces)},
+        extra={
+            "file_id": str(file.id),
+            "chunks": len(pieces),
+            "embedding_model": provider.identity,
+        },
     )
     return len(pieces)
+
+
+def _check_vectors(
+    provider: EmbeddingProvider, vectors: list[list[float]], *, expected: int
+) -> None:
+    """Refuse vectors that cannot be stored or compared correctly.
+
+    A provider that drops or reorders results would silently pair each chunk
+    with another chunk's meaning, and retrieval would return confidently wrong
+    passages. A vector of the wrong width either fails at insert or, worse, is
+    compared against the wrong space. Both must fail here, loudly.
+    """
+    if len(vectors) != expected:
+        raise ValueError(
+            f"Embedding provider returned {len(vectors)} vectors "
+            f"for {expected} texts."
+        )
+    for vector in vectors:
+        if len(vector) != provider.dimensions:
+            raise ValueError(
+                f"Embedding provider {provider.identity} returned a "
+                f"{len(vector)}-dimension vector."
+            )
 
 
 async def search_chunks(
@@ -142,7 +169,9 @@ async def search_chunks(
         return []
 
     provider = get_embedding_provider()
-    [query_vector] = await provider.embed([query])
+    query_vectors = await provider.embed([query], purpose="query")
+    _check_vectors(provider, query_vectors, expected=1)
+    [query_vector] = query_vectors
 
     # `cosine_distance` is pgvector's `<=>` operator: 0 means identical
     # direction, 1 means unrelated, 2 means opposite. Similarity is the
@@ -154,6 +183,10 @@ async def search_chunks(
         .join(File, File.id == FileChunk.file_id)
         # THE authorization filter. Never remove this to "simplify" the query.
         .where(FileChunk.user_id == user_id)
+        # Only vectors from the model that embedded the query. A distance
+        # between two models' vectors is a number, not a meaning; chunks from
+        # an older model wait for `scripts.reindex` instead of being compared.
+        .where(FileChunk.embedding_model == provider.identity)
         .order_by(distance)
         .limit(limit)
     )
@@ -190,9 +223,57 @@ async def search_chunks(
 
 
 async def count_chunks(db: AsyncSession, *, user_id: uuid.UUID) -> int:
-    """How many searchable passages this user has. Used to decide whether
-    retrieval is worth attempting at all."""
+    """Whether this user has any searchable passages (0 or 1). Used to decide
+    whether retrieval is worth attempting at all.
+
+    Counts only chunks from the active embedding model -- chunks from another
+    model are stored but not searchable until re-indexed.
+    """
+    identity = get_embedding_provider().identity
     result = await db.execute(
-        select(FileChunk.id).where(FileChunk.user_id == user_id).limit(1)
+        select(FileChunk.id)
+        .where(FileChunk.user_id == user_id, FileChunk.embedding_model == identity)
+        .limit(1)
     )
     return len(result.all())
+
+
+async def files_needing_index(
+    db: AsyncSession,
+    *,
+    identity: str,
+    after: uuid.UUID | None = None,
+    limit: int = 50,
+    user_id: uuid.UUID | None = None,
+) -> list[uuid.UUID]:
+    """Ids of files with text that are not fully indexed under `identity`.
+
+    That is: a READY file with extracted text that has either no chunks at all
+    (uploaded before Phase 6, or its indexing failed) or any chunk written by
+    a different embedding model.
+
+    Keyset-paginated on `id` rather than offset, so a caller that skips a file
+    which keeps failing still makes progress instead of re-reading it forever.
+    This is an operator query across users; `user_id` narrows it to one.
+    """
+    any_chunk = exists().where(FileChunk.file_id == File.id)
+    stale_chunk = exists().where(
+        FileChunk.file_id == File.id, FileChunk.embedding_model != identity
+    )
+    # Ids only: a page of 50 full files could be 50MB of extracted text.
+    statement = (
+        select(File.id)
+        .where(
+            File.status == FileStatus.READY,
+            File.extracted_text.is_not(None),
+            or_(~any_chunk, stale_chunk),
+        )
+        .order_by(File.id)
+        .limit(limit)
+    )
+    if after is not None:
+        statement = statement.where(File.id > after)
+    if user_id is not None:
+        statement = statement.where(File.user_id == user_id)
+    result = await db.execute(statement)
+    return list(result.scalars().all())
